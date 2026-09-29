@@ -438,4 +438,4 @@ def run_scheduler():
 
 
 if __name__ == "__main__":
-    run_scheduler()
+    get_top5_telegram_message()
