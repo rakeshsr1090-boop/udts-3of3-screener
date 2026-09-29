@@ -1,0 +1,39 @@
+name: STEP 2 Top 5 Telegram Alert
+
+on:
+  schedule:
+    - cron: '45 3 * * 1-5'  # 9:15 AM IST
+    - cron: '5 4 * * 1-5'   # 9:35 AM IST
+  workflow_dispatch:
+
+jobs:
+  telegram_alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            echo "No requirements.txt found. Skipping dependency install."
+          fi
+
+      - name: Run STEP 2 screener
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python screener.py --telegram
+
+      - name: Confirm run
+        if: success()
+        run: |
+          echo "STEP 2 screener executed successfully."
