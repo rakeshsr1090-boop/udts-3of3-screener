@@ -2,8 +2,8 @@ name: STEP 2 Top 5 Telegram Alert
 
 on:
   schedule:
-    - cron: '45 3 * * 1-5'  # 9:15 AM IST
-    - cron: '5 4 * * 1-5'   # 9:35 AM IST
+    - cron: '45 3 * * 1-5'
+    - cron: '5 4 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -36,8 +36,3 @@ jobs:
           from telegram_notifier import get_top5_telegram_message
           get_top5_telegram_message()
           PY
-
-      - name: Confirm run
-        if: success()
-        run: |
-          echo "STEP 2 screener executed successfully."
