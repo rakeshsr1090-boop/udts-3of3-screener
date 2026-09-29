@@ -1,3 +1,8 @@
+"""
+TELEGRAM NOTIFIER FOR UDTS STEP 2 — Daily Top 5 Stocks
+Sends notifications before market open (9:15 AM) and after (9:30 AM)
+"""
+
 import os
 import schedule
 import time
@@ -9,8 +14,6 @@ from functools import lru_cache
 
 import requests
 import yfinance as yf
-from telegram import Bot
-from telegram.error import TelegramError
 
 # ============================================================================
 # CONFIGURATION
@@ -33,9 +36,6 @@ NSE_HEADERS = {
 def today_ist():
     return pd.Timestamp.now(tz=IST).normalize().tz_localize(None)
 
-# Remove these imports:
-# from telegram import Bot
-# from telegram.error import TelegramError
 
 def send_telegram_message(message: str):
     """Send message via Telegram bot using the HTTP API"""
@@ -78,7 +78,7 @@ def _download_nse_bhavcopy(dt):
     """Download NSE EOD bhavcopy"""
     import io
     import zipfile
-    
+
     ymd = dt.strftime("%Y%m%d")
     ddmmyyyy = dt.strftime("%d%m%Y")
     urls = [
@@ -177,7 +177,6 @@ def _yf_history(symbol):
 
 def get_live_intraday_indicators(symbol):
     """Get STEP 2 indicators: CPR/VWAP/EMA/RSI"""
-    """Send message via Telegram bot using the HTTP API"""
     try:
         x = yf.download(
             symbol + ".NS", period="30d", interval="15m",
@@ -289,7 +288,7 @@ def get_live_intraday_indicators(symbol):
                     price = float(session["Close"].iloc[-1])
             else:
                 price = float(session["Close"].iloc[-1])
-        except:
+        except Exception:
             price = float(session["Close"].iloc[-1])
 
         long_cpr = price > tc
@@ -310,17 +309,23 @@ def get_live_intraday_indicators(symbol):
         if long_score == 4:
             direction = "LONG"
             score = 4.0
-            if rvol is not None and rvol >= 1.5: score += 1.5
-            if adx14 >= 25: score += 1.0
-            if avg_traded_value >= 5e7: score += 0.5
+            if rvol is not None and rvol >= 1.5:
+                score += 1.5
+            if adx14 >= 25:
+                score += 1.0
+            if avg_traded_value >= 5e7:
+                score += 0.5
         elif short_score == 4:
             direction = "SHORT"
             score = 4.0
-            if rvol is not None and rvol >= 1.5: score += 1.5
-            if adx14 >= 25: score += 1.0
-            if avg_traded_value >= 5e7: score += 0.5
+            if rvol is not None and rvol >= 1.5:
+                score += 1.5
+            if adx14 >= 25:
+                score += 1.0
+            if avg_traded_value >= 5e7:
+                score += 0.5
         else:
-            direction = "NEUTRAL" if long_score >= short_score else "NEUTRAL"
+            direction = "NEUTRAL"
             score = max(long_score, short_score)
 
         return {
@@ -335,17 +340,7 @@ def get_live_intraday_indicators(symbol):
             "Score": round(score, 1),
             "RVOL": round(rvol, 2) if rvol else None,
             "ADX": round(adx14, 2),
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "HTML",
         }
-        response = requests.post(url, data=payload, timeout=20)
-        if response.status_code == 200:
-            print(f"[✓] Telegram message sent at {datetime.now(IST).strftime('%H:%M:%S')}")
-        else:
-            print(f"[✗] Telegram error: {response.status_code} - {response.text}")
     except Exception as e:
         print(f"[!] Error for {symbol}: {str(e)[:50]}")
         return None
@@ -370,8 +365,7 @@ def get_top5_telegram_message():
     """Main function to generate and send top 5 notification"""
     try:
         print(f"\n[START] Scanning at {datetime.now(IST).strftime('%H:%M:%S')}")
-        
-        # Get symbols
+
         symbols_list = get_symbols()
         if not symbols_list:
             send_telegram_message("❌ Could not fetch NIFTY 200 symbols")
@@ -379,7 +373,6 @@ def get_top5_telegram_message():
 
         print(f"[•] Found {len(symbols_list)} symbols")
 
-        # Scan all
         print(f"[•] Scanning STEP 2 indicators...")
         results = scan_for_step2_results(symbols_list)
 
@@ -387,16 +380,13 @@ def get_top5_telegram_message():
             send_telegram_message("⚪ No STEP 2 candidates found yet")
             return
 
-        # Convert to DataFrame and sort
         df = pd.DataFrame(results)
         df = df[df["Direction"].isin(["LONG", "SHORT"])].copy()
         df = df.sort_values("Score", ascending=False).head(10)
 
-        # Separate LONG and SHORT
         longs = df[df["Direction"] == "LONG"].head(5)
         shorts = df[df["Direction"] == "SHORT"].head(5)
 
-        # Build message
         msg = f"<b>📊 STEP 2 — TOP STOCKS ({datetime.now(IST).strftime('%d-%b %H:%M IST')})</b>\n\n"
 
         if not longs.empty:
@@ -414,7 +404,6 @@ def get_top5_telegram_message():
 
         msg += f"\n⚠️ <i>This is a filter aid, not a trade guarantee.</i>"
 
-        # Send
         send_telegram_message(msg)
         print(f"[✓] Message sent successfully")
 
@@ -425,11 +414,9 @@ def get_top5_telegram_message():
 
 def schedule_notifications():
     """Schedule two daily notifications"""
-    # 9:15 AM - Before market open
     schedule.every().day.at("09:15").do(get_top5_telegram_message)
     print("✓ Scheduled notification at 09:15 IST (before market open)")
 
-    # 9:35 AM - After market open
     schedule.every().day.at("09:35").do(get_top5_telegram_message)
     print("✓ Scheduled notification at 09:35 IST (after market open)")
 
@@ -454,4 +441,3 @@ def run_scheduler():
 
 if __name__ == "__main__":
     get_top5_telegram_message()
-        print(f"[✗] Error sending message: {e}")
