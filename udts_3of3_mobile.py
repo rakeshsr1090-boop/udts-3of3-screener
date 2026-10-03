@@ -1100,36 +1100,6 @@ if "results" in st.session_state:
             st.dataframe(mixed[["Stock", "Month", "Week", "Day", "Direction", "EOD Date"]], hide_index=True, use_container_width=True)
         st.download_button("⬇️ Download UDTS 3/3 List", passed_udts[udts_cols].to_csv(index=False).encode(), "udts_3of3_list.csv", "text/csv", use_container_width=True)
 
-        # F&O CONTRACT VIEW — uses UDTS eligibility only, independent of Step 2.
-        st.divider()
-        st.subheader("🏦 F&O CONTRACT VIEW — UDTS ELIGIBILITY")
-        st.caption("Every UDTS 3/3 LONG/SHORT stock is checked for F&O eligibility. No stock-price, capital, quantity, Step-2 score, or top-10 cap is applied.")
-        if st.button("🔄 REFRESH F&O CONTRACTS", use_container_width=True):
-            try:
-                with st.spinner(f"Getting NSE ATM option-chain data for all {len(passed_udts)} UDTS-passed stocks..."):
-                    st.session_state.fno_results = build_fno_candidates(passed_udts.copy())
-                st.session_state.fno_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
-            except Exception as e:
-                st.error(f"F&O contract refresh failed: {e}")
-
-        if st.session_state.get("fno_results") is not None:
-            fno_df = st.session_state.fno_results.copy()
-            st.caption("Last F&O refresh: " + st.session_state.fno_scan_time)
-            if fno_df.empty:
-                st.info("No UDTS 3/3 stocks currently returned a usable ATM F&O quote.")
-            else:
-                fno_cols = ["Stock", "Direction", "Expiry", "Underlying", "ATM Strike", "Lot Size", "CE-ATM Price - Long", "PE-ATM Price - Short"]
-                st.dataframe(fno_df[fno_cols], hide_index=True, use_container_width=True,
-                    column_config={
-                        "Underlying": st.column_config.NumberColumn("Underlying (₹)", format="₹%.2f"),
-                        "ATM Strike": st.column_config.NumberColumn("ATM Strike (₹)", format="₹%.2f"),
-                        "Lot Size": st.column_config.NumberColumn("Lot Size", format="%d"),
-                        "CE-ATM Price - Long": st.column_config.NumberColumn("CE-ATM Price - Long (₹)", format="₹%.2f"),
-                        "PE-ATM Price - Short": st.column_config.NumberColumn("PE-ATM Price - Short (₹)", format="₹%.2f"),
-                    })
-                st.download_button("⬇️ Download UDTS F&O List", fno_df.to_csv(index=False).encode(), "udts_fno_candidates.csv", "text/csv", use_container_width=True)
-                st.warning("Lot size is sourced from NSE's F&O market-lot file when available. Verify the live quote, expiry, lot size and liquidity with your broker before placing an order.")
-
         # STEP 2 — LIVE CONFIRMATION ------------------------------------------
         st.divider()
         st.subheader("🎯 STEP 2 — LIVE CPR → VWAP → EMA 21/34 → RSI")
@@ -1149,6 +1119,17 @@ if "results" in st.session_state:
 
         if st.session_state.get("confirm_results") is not None:
             confirm_df = st.session_state.confirm_results.copy()
+            # Option-chain data is fetched only when the user taps the F&O
+            # refresh button, then shown in both Step-2 direction tables.
+            fno_columns = ["Lot Size", "CE-ATM Price - Long", "PE-ATM Price - Short"]
+            for column in fno_columns:
+                confirm_df[column] = None
+            fno_df = st.session_state.get("fno_results")
+            if fno_df is not None and not fno_df.empty:
+                confirm_df = confirm_df.drop(columns=fno_columns).merge(
+                    fno_df[["Stock"] + fno_columns], on="Stock", how="left"
+                )
+
             longs_confirm = confirm_df[confirm_df.Direction == "LONG"].sort_values(["Trade Candidate", "Strength Score", "Confirm Score", "Stock"], ascending=[False, False, False, True])
             shorts_confirm = confirm_df[confirm_df.Direction == "SHORT"].sort_values(["Trade Candidate", "Strength Score", "Confirm Score", "Stock"], ascending=[False, False, False, True])
             x, y, z, q = st.columns(4)
@@ -1156,15 +1137,38 @@ if "results" in st.session_state:
             st.caption("Last live confirmation refresh: " + st.session_state.confirm_scan_time)
             st.caption("Indicator timeframe: 15-minute LIVE | Current completed 15m bars included; current in-progress bar excluded")
 
-            confirm_cols = ["Stock", "Direction", "Price", "CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Confirm Score", "Strength Score", "Grade", "Mandatory Gate", "Trade Candidate", "Confirmation", "Indicator Date", "Indicator TF"]
+            confirm_cols = ["Stock", "Direction", "Price", "Lot Size", "CE-ATM Price - Long", "PE-ATM Price - Short", "CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Confirm Score", "Strength Score", "Grade", "Mandatory Gate", "Trade Candidate", "Confirmation", "Indicator Date", "Indicator TF"]
             st.markdown("**🟢 LONG confirmation candidates**")
             st.dataframe(longs_confirm[confirm_cols], hide_index=True, use_container_width=True,
-                         column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%d/4"), "Strength Score": st.column_config.NumberColumn("Strength", format="%.1f/10")})
+                         column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "Lot Size": st.column_config.NumberColumn("Lot Size", format="%d"), "CE-ATM Price - Long": st.column_config.NumberColumn("CE-ATM Price - Long (₹)", format="₹%.2f"), "PE-ATM Price - Short": st.column_config.NumberColumn("PE-ATM Price - Short (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%d/4"), "Strength Score": st.column_config.NumberColumn("Strength", format="%.1f/10")})
             st.markdown("**🔴 SHORT confirmation candidates**")
             st.dataframe(shorts_confirm[confirm_cols], hide_index=True, use_container_width=True,
-                         column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%d/4"), "Strength Score": st.column_config.NumberColumn("Strength", format="%.1f/10")})
+                         column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "Lot Size": st.column_config.NumberColumn("Lot Size", format="%d"), "CE-ATM Price - Long": st.column_config.NumberColumn("CE-ATM Price - Long (₹)", format="₹%.2f"), "PE-ATM Price - Short": st.column_config.NumberColumn("PE-ATM Price - Short (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%d/4"), "Strength Score": st.column_config.NumberColumn("Strength", format="%.1f/10")})
+            if st.session_state.get("fno_results") is None:
+                st.info("Tap **REFRESH F&O CONTRACTS** below to populate Lot Size, CE-ATM Price - Long, and PE-ATM Price - Short in these Step-2 tables.")
             st.caption("10/10 ranking: CPR 2 + VWAP 2 + EMA 21/34 2 + RSI 1 + RVOL 1.5 + ADX 1 + Liquidity 0.5. CPR + VWAP are mandatory gates and score ≥8/10 is the trade-candidate threshold. This is a ranking/confirmation aid, not a guarantee.")
             st.download_button("⬇️ Download UDTS-passed + LIVE Confirmation List", confirm_df[confirm_cols].to_csv(index=False).encode(), "udts_3of3_live_confirmation.csv", "text/csv", use_container_width=True)
+
+            # F&O data belongs after Step 2 because it fills the option columns
+            # shown in the LONG and SHORT confirmation tables above.
+            st.divider()
+            st.subheader("🏦 F&O DETAILS FOR STEP‑2 STOCKS")
+            st.caption("Refresh to populate the Lot Size, CE-ATM Price - Long, and PE-ATM Price - Short columns above. It checks every UDTS 3/3 LONG/SHORT stock; no capital or stock-price cap is applied.")
+            if st.button("🔄 REFRESH F&O CONTRACTS", use_container_width=True):
+                try:
+                    with st.spinner(f"Getting NSE ATM option-chain data for all {len(passed_udts)} UDTS-passed stocks..."):
+                        st.session_state.fno_results = build_fno_candidates(passed_udts.copy())
+                    st.session_state.fno_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+                except Exception as e:
+                    st.error(f"F&O contract refresh failed: {e}")
+
+            if st.session_state.get("fno_results") is not None:
+                fno_df = st.session_state.fno_results.copy()
+                st.caption("Last F&O refresh: " + st.session_state.fno_scan_time)
+                if fno_df.empty:
+                    st.info("No UDTS 3/3 stocks currently returned a usable ATM F&O quote.")
+                else:
+                    st.download_button("⬇️ Download UDTS F&O List", fno_df.to_csv(index=False).encode(), "udts_fno_candidates.csv", "text/csv", use_container_width=True)
 
         else:
             st.info("UDTS is ready. Tap **REFRESH LIVE CONFIRMATION** during market hours for the current Step-2 setup.")
