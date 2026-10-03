@@ -1159,6 +1159,10 @@ if "results" in st.session_state:
                     with st.spinner(f"Getting NSE ATM option-chain data for all {len(passed_udts)} UDTS-passed stocks..."):
                         st.session_state.fno_results = build_fno_candidates(passed_udts.copy())
                     st.session_state.fno_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+                    # The Step-2 tables are rendered earlier in this script.
+                    # Rerun now so their F&O columns immediately use the data
+                    # fetched by this button click rather than showing None.
+                    st.rerun()
                 except Exception as e:
                     st.error(f"F&O contract refresh failed: {e}")
 
