@@ -1,4 +1,5 @@
 import io
+import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -756,11 +757,26 @@ def scan(symbol_list, nse_eod, workers=8):
 # F&O SECTION ---------------------------------------------------------------
 @st.cache_data(ttl=60, show_spinner=False)
 def nse_option_chain(symbol):
-    url="https://www.nseindia.com/api/option-chain-equities"
-    ses=requests.Session(); ses.headers.update(NSE_HEADERS)
-    ses.get("https://www.nseindia.com/option-chain", timeout=15)
-    r=ses.get(url, params={"symbol":symbol}, timeout=20); r.raise_for_status()
-    return r.json()
+    """Fetch one stock option chain with NSE cookie setup and retry handling."""
+    url = "https://www.nseindia.com/api/option-chain-equities"
+    last_error = None
+    for attempt in range(3):
+        try:
+            session = requests.Session()
+            session.headers.update(NSE_HEADERS)
+            # NSE frequently returns 401/403 without first issuing browser cookies.
+            session.get("https://www.nseindia.com/option-chain", timeout=15)
+            response = session.get(url, params={"symbol": symbol}, timeout=25)
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("records", {}).get("data"):
+                return payload
+            last_error = ValueError("NSE returned no option-chain records")
+        except Exception as error:
+            last_error = error
+        if attempt < 2:
+            time.sleep(1.0 * (attempt + 1))
+    raise RuntimeError(f"NSE option chain unavailable for {symbol}: {last_error}")
 
 def _n(v):
     try: return None if v in (None,"","-") else float(v)
@@ -843,17 +859,20 @@ def build_fno_candidates(df):
     sel=df[df["Direction"].isin(["LONG", "SHORT"])].copy()
     if sel.empty: return pd.DataFrame()
     lot_sizes = nse_fno_lot_sizes()
+    # NSE is sensitive to bursts of option-chain requests. Process stocks one
+    # at a time instead of opening several separate sessions concurrently.
     out=[]
-    with ThreadPoolExecutor(max_workers=min(6,len(sel))) as ex:
-        jobs={ex.submit(fno_pick,str(r["Stock"]),lot_sizes):r for _,r in sel.iterrows()}
-        for f in as_completed(jobs):
-            r=jobs[f]
-            try:
-                q=f.result()
-                if q:
-                    q["Direction"]=r["Direction"]
-                    out.append(q)
-            except Exception: pass
+    for _, r in sel.sort_values("Stock").iterrows():
+        try:
+            q = fno_pick(str(r["Stock"]), lot_sizes)
+            if q:
+                q["Direction"] = r["Direction"]
+                out.append(q)
+        except Exception:
+            # A missing/blocked exchange response is not treated as F&O
+            # ineligibility; it simply remains blank until the next refresh.
+            pass
+        time.sleep(0.25)
     return pd.DataFrame(out).sort_values("Stock") if out else pd.DataFrame()
 
 # STEP 4 — INDEX F&O INTRADAY SYSTEM --------------------------------------------
