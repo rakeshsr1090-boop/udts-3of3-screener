@@ -1097,17 +1097,21 @@ if "results" in st.session_state:
             confirm_df = st.session_state.confirm_results.copy()
             longs_confirm = confirm_df[confirm_df.Direction == "LONG"].sort_values(["Trade Candidate", "Strength Score", "Confirm Score", "Stock"], ascending=[False, False, False, True])
             shorts_confirm = confirm_df[confirm_df.Direction == "SHORT"].sort_values(["Trade Candidate", "Strength Score", "Confirm Score", "Stock"], ascending=[False, False, False, True])
+
+            top5_longs_confirm = longs_confirm.head(5).copy()
+            top5_shorts_confirm = shorts_confirm.head(5).copy()
+
             x, y, z, q = st.columns(4)
             x.metric("UDTS stocks checked", len(confirm_df)); y.metric("🏆 8+ /10", int((confirm_df["Strength Score"] >= 8).sum())); z.metric("🟢 LONG 4/4", int((confirm_df["Confirmation"] == "LONG 4/4").sum())); q.metric("🔴 SHORT 4/4", int((confirm_df["Confirmation"] == "SHORT 4/4").sum()))
             st.caption("Last live confirmation refresh: " + st.session_state.confirm_scan_time)
             st.caption("Indicator timeframe: 15-minute LIVE | Current completed 15m bars included; current in-progress bar excluded")
 
             confirm_cols = ["Stock", "Direction", "Price", "Max Qty", "Required Capital", "CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Confirm Score", "Strength Score", "Grade", "Mandatory Gate", "Trade Candidate", "Confirmation", "Indicator Date", "Indicator TF"]
-            st.markdown("**🟢 LONG confirmation candidates**")
-            st.dataframe(longs_confirm[confirm_cols], hide_index=True, use_container_width=True,
+            st.markdown("**🟢 TOP 5 LONG confirmation candidates**")
+            st.dataframe(top5_longs_confirm[confirm_cols], hide_index=True, use_container_width=True,
                          column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "Max Qty": st.column_config.NumberColumn("Max Qty", format="%d"), "Required Capital": st.column_config.NumberColumn("Required Capital (₹)", format="₹%.2f")})
-            st.markdown("**🔴 SHORT confirmation candidates**")
-            st.dataframe(shorts_confirm[confirm_cols], hide_index=True, use_container_width=True,
+            st.markdown("**🔴 TOP 5 SHORT confirmation candidates**")
+            st.dataframe(top5_shorts_confirm[confirm_cols], hide_index=True, use_container_width=True,
                          column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "Max Qty": st.column_config.NumberColumn("Max Qty", format="%d"), "Required Capital": st.column_config.NumberColumn("Required Capital (₹)", format="₹%.2f")})
             st.caption("10/10 ranking: CPR 2 + VWAP 2 + EMA 21/34 2 + RSI 1 + RVOL 1.5 + ADX 1 + Liquidity 0.5. CPR + VWAP are mandatory gates and score ≥8/10 is the trade-candidate threshold.")
             st.download_button("⬇️ Download UDTS-passed + LIVE Confirmation List", confirm_df[confirm_cols].to_csv(index=False).encode(), "udts_3of3_live_confirmation.csv", "text/csv", use_container_width=True)
