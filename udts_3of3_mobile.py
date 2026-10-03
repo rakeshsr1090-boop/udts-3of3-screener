@@ -755,17 +755,27 @@ def scan(symbol_list, nse_eod, workers=8):
 
 
 # F&O SECTION ---------------------------------------------------------------
-@st.cache_data(ttl=60, show_spinner=False)
-def nse_option_chain(symbol):
-    """Fetch one stock option chain with NSE cookie setup and retry handling."""
+def _nse_option_session():
+    """Create one browser-like NSE session to reuse across all stock requests."""
+    session = requests.Session()
+    session.headers.update({
+        **NSE_HEADERS,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+    })
+    # Prime both the home page and option-chain page so NSE issues cookies.
+    session.get("https://www.nseindia.com/", timeout=20)
+    session.get("https://www.nseindia.com/option-chain", timeout=20)
+    return session
+
+
+def nse_option_chain(symbol, session):
+    """Fetch one stock option chain using a shared cookie-initialized session."""
     url = "https://www.nseindia.com/api/option-chain-equities"
     last_error = None
     for attempt in range(3):
         try:
-            session = requests.Session()
-            session.headers.update(NSE_HEADERS)
-            # NSE frequently returns 401/403 without first issuing browser cookies.
-            session.get("https://www.nseindia.com/option-chain", timeout=15)
             response = session.get(url, params={"symbol": symbol}, timeout=25)
             response.raise_for_status()
             payload = response.json()
@@ -775,6 +785,8 @@ def nse_option_chain(symbol):
         except Exception as error:
             last_error = error
         if attempt < 2:
+            # Refresh NSE cookies before retrying a throttled/expired session.
+            session.get("https://www.nseindia.com/option-chain", timeout=20)
             time.sleep(1.0 * (attempt + 1))
     raise RuntimeError(f"NSE option chain unavailable for {symbol}: {last_error}")
 
@@ -819,9 +831,9 @@ def nse_fno_lot_sizes():
         return {}
 
 
-def fno_pick(symbol, lot_sizes):
+def fno_pick(symbol, lot_sizes, session):
     """Return the nearest-expiry ATM CE and PE for one UDTS-qualified stock."""
-    data=nse_option_chain(symbol); rec=data.get("records",{})
+    data=nse_option_chain(symbol, session); rec=data.get("records",{})
     spot=_n(rec.get("underlyingValue")); rows=rec.get("data",[])
     if spot is None or not rows: return None
     exps=[]
@@ -874,11 +886,12 @@ def build_fno_candidates(df):
     sel = sel.head(15)
     lot_sizes = nse_fno_lot_sizes()
     # NSE is sensitive to bursts of option-chain requests. Process stocks one
-    # at a time instead of opening several separate sessions concurrently.
+    # at a time through one cookie-initialized browser session.
     out=[]
+    session = _nse_option_session()
     for _, r in sel.sort_values("Stock").iterrows():
         try:
-            q = fno_pick(str(r["Stock"]), lot_sizes)
+            q = fno_pick(str(r["Stock"]), lot_sizes, session)
             if q:
                 q["Direction"] = r["Direction"]
                 q["Strength Score"] = r["Strength Score"]
