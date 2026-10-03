@@ -854,10 +854,24 @@ def fno_pick(symbol, lot_sizes):
     }
 
 def build_fno_candidates(df):
-    """Check every UDTS 3/3 LONG/SHORT stock; no price, capital, or rank cap."""
+    """Fetch F&O data for the 15 best fully-confirmed Grade A+ candidates."""
     if df.empty: return pd.DataFrame()
-    sel=df[df["Direction"].isin(["LONG", "SHORT"])].copy()
+    # F&O eligibility: Grade A+ (which is score >= 9 under this model),
+    # full confirmation in the UDTS direction, then ADX/RVOL ranking.
+    confirmed = (
+        ((df["Direction"] == "LONG") & (df["Confirmation"] == "LONG 4/4")) |
+        ((df["Direction"] == "SHORT") & (df["Confirmation"] == "SHORT 4/4"))
+    )
+    sel = df[
+        df["Direction"].isin(["LONG", "SHORT"])
+        & confirmed
+        & (df["Grade"] == "A+")
+        & (pd.to_numeric(df["Strength Score"], errors="coerce") >= 9.0)
+    ].copy()
     if sel.empty: return pd.DataFrame()
+    # This limits live NSE option-chain calls to 15 stocks.
+    sel = sel.sort_values(["ADX", "RVOL"], ascending=[False, False])
+    sel = sel.head(15)
     lot_sizes = nse_fno_lot_sizes()
     # NSE is sensitive to bursts of option-chain requests. Process stocks one
     # at a time instead of opening several separate sessions concurrently.
@@ -1127,7 +1141,7 @@ if "results" in st.session_state:
 
         if st.button("🔄 REFRESH LIVE CONFIRMATION", use_container_width=True):
             try:
-                with st.spinner(f"Refreshing Step 2 and F&O data for {len(passed_udts)} UDTS-passed stocks..."):
+                with st.spinner(f"Refreshing Step 2 for {len(passed_udts)} UDTS stocks and F&O data for up to 15 Grade A+ confirmed stocks..."):
                     confirm_df = add_live_confirmation_filter(passed_udts.copy())
                     fno_df = build_fno_candidates(passed_udts.copy())
                 st.session_state.confirm_results = confirm_df
@@ -1139,8 +1153,8 @@ if "results" in st.session_state:
 
         if st.session_state.get("confirm_results") is not None:
             confirm_df = st.session_state.confirm_results.copy()
-            # F&O data is fetched with the Step-2 refresh and shown directly
-            # in both direction tables.
+            # F&O data is fetched only for up to 15 Grade A+ / 9+ fully
+            # confirmed stocks, ranked by ADX then RVOL.
             fno_columns = ["Lot Size", "CE-ATM Price - Long", "PE-ATM Price - Short"]
             for column in fno_columns:
                 confirm_df[column] = None
@@ -1155,7 +1169,7 @@ if "results" in st.session_state:
             x, y, z, q = st.columns(4)
             x.metric("UDTS stocks checked", len(confirm_df)); y.metric("🏆 8+ /10", int((confirm_df["Strength Score"] >= 8).sum())); z.metric("🟢 LONG 4/4", int((confirm_df["Confirmation"] == "LONG 4/4").sum())); q.metric("🔴 SHORT 4/4", int((confirm_df["Confirmation"] == "SHORT 4/4").sum()))
             st.caption("Last live confirmation refresh: " + st.session_state.confirm_scan_time)
-            st.caption("Indicator timeframe: 15-minute LIVE | Current completed 15m bars included; current in-progress bar excluded")
+            st.caption("Indicator timeframe: 15-minute LIVE | Current completed 15m bars included; current in-progress bar excluded | F&O fields: Grade A+, score ≥9, confirmation 4/4, then ADX/RVOL ranking (maximum 15)")
 
             confirm_cols = ["Stock", "Direction", "Price", "Lot Size", "CE-ATM Price - Long", "PE-ATM Price - Short", "CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Confirm Score", "Strength Score", "Grade", "Mandatory Gate", "Trade Candidate", "Confirmation", "Indicator Date", "Indicator TF"]
             st.markdown("**🟢 LONG confirmation candidates**")
