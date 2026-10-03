@@ -616,7 +616,7 @@ def get_live_intraday_indicators(symbol):
         return None
 
 
-def add_live_confirmation_filter(df, capital_limit):
+def add_live_confirmation_filter(df):
     if df.empty:
         return df
     indicators = {}
@@ -637,10 +637,9 @@ def add_live_confirmation_filter(df, capital_limit):
     for field in fields:
         result[field] = result["Stock"].map(lambda s: indicators.get(s, {}).get(field) if indicators.get(s) else None)
 
-    # Use live price for Step 2 capital/quantity display.
+    # Use live price for the Step 2 display only; no capital allocation filter
+    # is applied to the UDTS or F&O universe.
     result["Price"] = result["Live Price"].fillna(result["Price"])
-    result["Max Qty"] = result["Price"].apply(lambda p: int(capital_limit // float(p)) if pd.notna(p) and float(p) > 0 else 0)
-    result["Required Capital"] = result.apply(lambda r: round(float(r["Price"]) * int(r["Max Qty"]), 2) if pd.notna(r["Price"]) else 0.0, axis=1)
 
     result["Confirmed"] = result.apply(
         lambda r: (r["Direction"] == "LONG" and r.get("Confirmation") == "LONG 4/4") or
@@ -742,36 +741,6 @@ def add_confirmation_filter(df, only_confirmed=False):
     return result
 
 
-def add_capital_filter(df, capital_limit):
-    if df.empty:
-        return df
-    prices = {}
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = {ex.submit(get_latest_price, s): s for s in df["Stock"]}
-        for f in as_completed(futures):
-            s = futures[f]
-            try:
-                prices[s] = f.result()
-            except Exception:
-                prices[s] = None
-
-    result = df.copy()
-    result["Price"] = result["Stock"].map(prices).fillna(result["Price"])
-
-    def max_qty(price):
-        if pd.isna(price) or price <= 0:
-            return 0
-        return int(capital_limit // float(price))
-
-    result["Max Qty"] = result["Price"].apply(max_qty)
-    result["Required Capital"] = result.apply(
-        lambda r: round(float(r["Price"]) * int(r["Max Qty"]), 2)
-        if pd.notna(r["Price"]) else 0.0,
-        axis=1,
-    )
-    return result
-
-
 def scan(symbol_list, nse_eod, workers=8):
     out = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -797,7 +766,45 @@ def _n(v):
     try: return None if v in (None,"","-") else float(v)
     except Exception: return None
 
-def fno_pick(symbol,direction):
+def _option_lot_size(*options):
+    """Read the exchange lot size when NSE includes it in the option chain."""
+    for option in options:
+        if not option:
+            continue
+        for field in ("marketLot", "lotSize", "marketlot"):
+            value = _n(option.get(field))
+            if value and value > 0:
+                return int(value)
+    return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def nse_fno_lot_sizes():
+    """Get current exchange-defined stock F&O lot sizes (best-effort)."""
+    try:
+        response = requests.get(
+            "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv",
+            headers=NSE_HEADERS, timeout=20,
+        )
+        response.raise_for_status()
+        raw = pd.read_csv(io.StringIO(response.text))
+        columns = {str(column).strip().upper(): column for column in raw.columns}
+        symbol_col = next((column for name, column in columns.items() if "SYMBOL" in name), None)
+        lot_col = next((column for name, column in columns.items() if "LOT" in name), None)
+        if not symbol_col or not lot_col:
+            return {}
+        lots = {}
+        for _, row in raw[[symbol_col, lot_col]].dropna().iterrows():
+            lot = _n(str(row[lot_col]).split()[0])
+            if lot and lot > 0:
+                lots[str(row[symbol_col]).strip().upper()] = int(lot)
+        return lots
+    except Exception:
+        return {}
+
+
+def fno_pick(symbol, lot_sizes):
+    """Return the nearest-expiry ATM CE and PE for one UDTS-qualified stock."""
     data=nse_option_chain(symbol); rec=data.get("records",{})
     spot=_n(rec.get("underlyingValue")); rows=rec.get("data",[])
     if spot is None or not rows: return None
@@ -806,49 +813,48 @@ def fno_pick(symbol,direction):
         try: exps.append(pd.to_datetime(x.get("expiryDate"),dayfirst=True))
         except Exception: pass
     if not exps: return None
-    expiry=min(exps); expiry_text=expiry.strftime("%d-%b-%Y"); typ="CE" if direction=="LONG" else "PE"
-    cand=[]
+    expiry=min(exps); expiry_text=expiry.strftime("%d-%b-%Y")
+    strikes=[]
     for x in rows:
         if x.get("expiryDate")!=expiry_text: continue
-        opt=x.get(typ); strike=_n(x.get("strikePrice"))
-        if not opt or strike is None: continue
-        ltp=_n(opt.get("lastPrice"))
-        if ltp is None or ltp<=0: continue
-        bid,ask=_n(opt.get("bidprice")),_n(opt.get("askPrice"))
-        vol=_n(opt.get("totalTradedVolume")) or 0
-        oi=_n(opt.get("openInterest")) or 0
-        iv=_n(opt.get("impliedVolatility"))
-        spread=(ask-bid) if bid is not None and ask is not None and ask>=bid else None
-        spread_pct=(spread/ltp*100) if spread is not None else 999
-        distance=abs(strike-spot)/spot*100
-        if distance>8: continue
-        score=distance*2-min(vol,500000)/500000-min(oi,2000000)/2000000+min(spread_pct,20)/20
-        cand.append((score,strike,ltp,bid,ask,spread,spread_pct,oi,vol,iv))
-    if not cand: return None
-    _,strike,ltp,bid,ask,spread,spread_pct,oi,vol,iv=sorted(cand)[0]
-    return {"Option":f"{symbol} {strike:.0f} {typ}","Expiry":expiry_text,"Strike":strike,"Type":typ,
-            "Underlying":spot,"Premium":ltp,"Bid":bid,"Ask":ask,"Spread":spread,
-            "Spread %":spread_pct if spread_pct<999 else None,"OI":oi,"Volume":vol,"IV":iv}
+        strike=_n(x.get("strikePrice"))
+        if strike is not None:
+            strikes.append(strike)
+    if not strikes: return None
+    atm=min(strikes, key=lambda strike: abs(strike-spot))
+    contract=next((x for x in rows if x.get("expiryDate")==expiry_text and _n(x.get("strikePrice"))==atm), None)
+    if not contract: return None
+    ce, pe = contract.get("CE"), contract.get("PE")
+    ce_price = _n(ce.get("lastPrice")) if ce else None
+    pe_price = _n(pe.get("lastPrice")) if pe else None
+    # A stock is F&O-eligible here only when NSE provides an ATM option quote.
+    if not any(price and price > 0 for price in (ce_price, pe_price)):
+        return None
+    return {
+        "Stock": symbol, "Expiry": expiry_text, "Underlying": spot,
+        "ATM Strike": atm, "Lot Size": _option_lot_size(ce, pe) or lot_sizes.get(symbol),
+        "CE-ATM Price - Long": ce_price,
+        "PE-ATM Price - Short": pe_price,
+    }
 
 def build_fno_candidates(df):
+    """Check every UDTS 3/3 LONG/SHORT stock; no price, capital, or rank cap."""
     if df.empty: return pd.DataFrame()
-    sel=df[(df["Trade Candidate"]==True)&(df["Strength Score"]>=8)].copy()
-    if sel.empty: sel=df[df["Strength Score"]>=8].copy()
+    sel=df[df["Direction"].isin(["LONG", "SHORT"])].copy()
     if sel.empty: return pd.DataFrame()
-    sel=sel.sort_values(["Strength Score","ADX","RVOL"],ascending=[False,False,False]).head(10)
+    lot_sizes = nse_fno_lot_sizes()
     out=[]
     with ThreadPoolExecutor(max_workers=min(6,len(sel))) as ex:
-        jobs={ex.submit(fno_pick,str(r["Stock"]),str(r["Direction"])):r for _,r in sel.iterrows()}
+        jobs={ex.submit(fno_pick,str(r["Stock"]),lot_sizes):r for _,r in sel.iterrows()}
         for f in as_completed(jobs):
             r=jobs[f]
             try:
                 q=f.result()
                 if q:
-                    q["Stock"]=r["Stock"]; q["Direction"]=r["Direction"]
-                    q["Strength Score"]=r["Strength Score"]; q["Grade"]=r["Grade"]
+                    q["Direction"]=r["Direction"]
                     out.append(q)
             except Exception: pass
-    return pd.DataFrame(out)
+    return pd.DataFrame(out).sort_values("Stock") if out else pd.DataFrame()
 
 # STEP 4 — INDEX F&O INTRADAY SYSTEM --------------------------------------------
 @st.cache_data(ttl=45, show_spinner=False)
@@ -1045,11 +1051,6 @@ st.caption("STEP 1: Strict UDTS filter — previous completed Month + Week + Day
 
 with st.expander("⚙️ Settings"):
     workers = st.slider("Parallel downloads", 2, 12, 8)
-    capital_limit = st.number_input(
-        "💰 Maximum trading capital per stock (₹)",
-        min_value=1000, max_value=10000, value=10000, step=500,
-        help="Maximum amount allocated to one stock. Quantity is rounded down to whole shares.",
-    )
 
 st.markdown("**LONG:** 🟢 Month + 🟢 Week + 🟢 Day")
 st.markdown("**SHORT:** 🔴 Month + 🔴 Week + 🔴 Day")
@@ -1068,6 +1069,8 @@ if st.button("🔄 SCAN UDTS ONLY", type="primary", use_container_width=True):
             st.session_state.eod_date = eod_dt.strftime("%d-%b-%Y")
             st.session_state.confirm_results = None
             st.session_state.confirm_scan_time = None
+            st.session_state.fno_results = None
+            st.session_state.fno_scan_time = None
     except Exception as e:
         st.error(f"UDTS scan failed: {e}")
 
@@ -1077,8 +1080,6 @@ if "results" in st.session_state:
     if not df.empty:
         passed_udts = df[df.Direction.isin(["LONG", "SHORT"])].copy()
         mixed = df[~df.Direction.isin(["LONG", "SHORT"])].copy()
-        with st.spinner("Updating latest prices and capital quantities for UDTS-passed stocks..."):
-            passed_udts = add_capital_filter(passed_udts, capital_limit)
         st.session_state.udts_passed = passed_udts.copy()
 
         longs_udts = passed_udts[passed_udts.Direction == "LONG"].sort_values("Stock")
@@ -1086,22 +1087,48 @@ if "results" in st.session_state:
         a, b, c = st.columns(3)
         a.metric("Scanned", len(df)); b.metric("🟢 UDTS LONG 3/3", len(longs_udts)); c.metric("🔴 UDTS SHORT 3/3", len(shorts_udts))
         st.caption("Last UDTS scan: " + st.session_state.scan_time)
-        st.caption(f"NSE EOD candle used: {st.session_state.eod_date} | 💰 Capital limit: ₹{capital_limit:,.0f} per stock")
+        st.caption(f"NSE EOD candle used: {st.session_state.eod_date}")
 
-        udts_cols = ["Stock", "Month", "Week", "Day", "Direction", "Price", "Max Qty", "Required Capital"]
+        udts_cols = ["Stock", "Month", "Week", "Day", "Direction", "Price"]
         st.subheader("🟢 UDTS LONG — 3/3")
         st.dataframe(longs_udts[udts_cols], hide_index=True, use_container_width=True,
-                     column_config={"Price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f"),
-                                    "Max Qty": st.column_config.NumberColumn("Max Qty", format="%d"),
-                                    "Required Capital": st.column_config.NumberColumn("Required Capital (₹)", format="₹%.2f")})
+                     column_config={"Price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f")})
         st.subheader("🔴 UDTS SHORT — 3/3")
         st.dataframe(shorts_udts[udts_cols], hide_index=True, use_container_width=True,
-                     column_config={"Price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f"),
-                                    "Max Qty": st.column_config.NumberColumn("Max Qty", format="%d"),
-                                    "Required Capital": st.column_config.NumberColumn("Required Capital (₹)", format="₹%.2f")})
+                     column_config={"Price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f")})
         with st.expander("⚪ Mixed / rejected by UDTS"):
             st.dataframe(mixed[["Stock", "Month", "Week", "Day", "Direction", "EOD Date"]], hide_index=True, use_container_width=True)
         st.download_button("⬇️ Download UDTS 3/3 List", passed_udts[udts_cols].to_csv(index=False).encode(), "udts_3of3_list.csv", "text/csv", use_container_width=True)
+
+        # F&O CONTRACT VIEW — uses UDTS eligibility only, independent of Step 2.
+        st.divider()
+        st.subheader("🏦 F&O CONTRACT VIEW — UDTS ELIGIBILITY")
+        st.caption("Every UDTS 3/3 LONG/SHORT stock is checked for F&O eligibility. No stock-price, capital, quantity, Step-2 score, or top-10 cap is applied.")
+        if st.button("🔄 REFRESH F&O CONTRACTS", use_container_width=True):
+            try:
+                with st.spinner(f"Getting NSE ATM option-chain data for all {len(passed_udts)} UDTS-passed stocks..."):
+                    st.session_state.fno_results = build_fno_candidates(passed_udts.copy())
+                st.session_state.fno_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+            except Exception as e:
+                st.error(f"F&O contract refresh failed: {e}")
+
+        if st.session_state.get("fno_results") is not None:
+            fno_df = st.session_state.fno_results.copy()
+            st.caption("Last F&O refresh: " + st.session_state.fno_scan_time)
+            if fno_df.empty:
+                st.info("No UDTS 3/3 stocks currently returned a usable ATM F&O quote.")
+            else:
+                fno_cols = ["Stock", "Direction", "Expiry", "Underlying", "ATM Strike", "Lot Size", "CE-ATM Price - Long", "PE-ATM Price - Short"]
+                st.dataframe(fno_df[fno_cols], hide_index=True, use_container_width=True,
+                    column_config={
+                        "Underlying": st.column_config.NumberColumn("Underlying (₹)", format="₹%.2f"),
+                        "ATM Strike": st.column_config.NumberColumn("ATM Strike (₹)", format="₹%.2f"),
+                        "Lot Size": st.column_config.NumberColumn("Lot Size", format="%d"),
+                        "CE-ATM Price - Long": st.column_config.NumberColumn("CE-ATM Price - Long (₹)", format="₹%.2f"),
+                        "PE-ATM Price - Short": st.column_config.NumberColumn("PE-ATM Price - Short (₹)", format="₹%.2f"),
+                    })
+                st.download_button("⬇️ Download UDTS F&O List", fno_df.to_csv(index=False).encode(), "udts_fno_candidates.csv", "text/csv", use_container_width=True)
+                st.warning("Lot size is sourced from NSE's F&O market-lot file when available. Verify the live quote, expiry, lot size and liquidity with your broker before placing an order.")
 
         # STEP 2 — LIVE CONFIRMATION ------------------------------------------
         st.divider()
@@ -1112,7 +1139,7 @@ if "results" in st.session_state:
         if st.button("🔄 REFRESH LIVE CONFIRMATION", use_container_width=True):
             try:
                 with st.spinner(f"Refreshing LIVE confirmation for {len(passed_udts)} UDTS-passed stocks..."):
-                    confirm_df = add_live_confirmation_filter(passed_udts.copy(), capital_limit)
+                    confirm_df = add_live_confirmation_filter(passed_udts.copy())
                 st.session_state.confirm_results = confirm_df
                 st.session_state.confirm_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
                 st.session_state.fno_results = None
@@ -1129,49 +1156,15 @@ if "results" in st.session_state:
             st.caption("Last live confirmation refresh: " + st.session_state.confirm_scan_time)
             st.caption("Indicator timeframe: 15-minute LIVE | Current completed 15m bars included; current in-progress bar excluded")
 
-            confirm_cols = ["Stock", "Direction", "Price", "Max Qty", "Required Capital", "CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Confirm Score", "Strength Score", "Grade", "Mandatory Gate", "Trade Candidate", "Confirmation", "Indicator Date", "Indicator TF"]
+            confirm_cols = ["Stock", "Direction", "Price", "CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Confirm Score", "Strength Score", "Grade", "Mandatory Gate", "Trade Candidate", "Confirmation", "Indicator Date", "Indicator TF"]
             st.markdown("**🟢 LONG confirmation candidates**")
             st.dataframe(longs_confirm[confirm_cols], hide_index=True, use_container_width=True,
-                         column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "Max Qty": st.column_config.NumberColumn("Max Qty", format="%d"), "Required Capital": st.column_config.NumberColumn("Required Capital (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%d/4"), "Strength Score": st.column_config.NumberColumn("Strength", format="%.1f/10")})
+                         column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%d/4"), "Strength Score": st.column_config.NumberColumn("Strength", format="%.1f/10")})
             st.markdown("**🔴 SHORT confirmation candidates**")
             st.dataframe(shorts_confirm[confirm_cols], hide_index=True, use_container_width=True,
-                         column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "Max Qty": st.column_config.NumberColumn("Max Qty", format="%d"), "Required Capital": st.column_config.NumberColumn("Required Capital (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%d/4"), "Strength Score": st.column_config.NumberColumn("Strength", format="%.1f/10")})
+                         column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%d/4"), "Strength Score": st.column_config.NumberColumn("Strength", format="%.1f/10")})
             st.caption("10/10 ranking: CPR 2 + VWAP 2 + EMA 21/34 2 + RSI 1 + RVOL 1.5 + ADX 1 + Liquidity 0.5. CPR + VWAP are mandatory gates and score ≥8/10 is the trade-candidate threshold. This is a ranking/confirmation aid, not a guarantee.")
             st.download_button("⬇️ Download UDTS-passed + LIVE Confirmation List", confirm_df[confirm_cols].to_csv(index=False).encode(), "udts_3of3_live_confirmation.csv", "text/csv", use_container_width=True)
-
-            # STEP 3 — F&O CONTRACT VIEW
-            st.divider()
-            st.subheader("🏦 STEP 3 — F&O CONTRACT VIEW")
-            st.caption("Only 8+/10 Step-2 candidates are checked. LONG → near-ATM CE; SHORT → near-ATM PE. Data comes from the NSE equity option chain.")
-
-            if st.button("🔄 REFRESH F&O CONTRACTS", use_container_width=True):
-                try:
-                    with st.spinner("Getting current NSE option-chain data..."):
-                        st.session_state.fno_results=build_fno_candidates(confirm_df.copy())
-                    st.session_state.fno_scan_time=datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
-                except Exception as e:
-                    st.error(f"F&O contract refresh failed: {e}")
-
-            if st.session_state.get("fno_results") is not None:
-                fno_df=st.session_state.fno_results.copy()
-                st.caption("Last F&O refresh: "+st.session_state.fno_scan_time)
-                if fno_df.empty:
-                    st.info("No 8+/10 Step-2 candidates available for F&O contract selection.")
-                else:
-                    cols=["Stock","Direction","Strength Score","Grade","Option","Expiry","Strike","Type","Underlying","Premium","Bid","Ask","Spread %","OI","Volume","IV"]
-                    st.dataframe(fno_df[cols],hide_index=True,use_container_width=True,
-                        column_config={
-                            "Strength Score":st.column_config.NumberColumn("Strength",format="%.1f/10"),
-                            "Underlying":st.column_config.NumberColumn("Underlying (₹)",format="₹%.2f"),
-                            "Premium":st.column_config.NumberColumn("Premium (₹)",format="₹%.2f"),
-                            "Bid":st.column_config.NumberColumn("Bid (₹)",format="₹%.2f"),
-                            "Ask":st.column_config.NumberColumn("Ask (₹)",format="₹%.2f"),
-                            "Spread %":st.column_config.NumberColumn("Spread %",format="%.2f%%"),
-                        })
-                    st.download_button("⬇️ Download F&O Candidates",fno_df.to_csv(index=False).encode(),"udts_fno_candidates.csv","text/csv",use_container_width=True)
-                    st.warning("Check expiry, bid/ask spread, OI, volume and your broker's current lot size before entering. This is a contract-selection aid, not a trade guarantee.")
-            else:
-                st.info("Run LIVE confirmation first, then tap **REFRESH F&O CONTRACTS**.")
 
         else:
             st.info("UDTS is ready. Tap **REFRESH LIVE CONFIRMATION** during market hours for the current Step-2 setup.")
