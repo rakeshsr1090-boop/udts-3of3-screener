@@ -145,6 +145,11 @@ def _yf_history(symbol):
     return x[~x.index.duplicated(keep="last")].sort_index()
 
 
+def _debug_symbol(symbol, message, payload):
+    if str(symbol).upper() == "GODREJIND":
+        print(f"[DEBUG {message}] {symbol}: {payload}")
+
+
 def get_udts(symbol, nse_eod):
     try:
         x = _yf_history(symbol)
@@ -204,6 +209,16 @@ def get_udts(symbol, nse_eod):
         mg, wg, dg = m.Close > m.Open, w.Close > w.Open, day.Close > day.Open
         mr, wr, dr = m.Close < m.Open, w.Close < w.Open, day.Close < day.Open
         direction = "LONG" if mg and wg and dg else "SHORT" if mr and wr and dr else "—"
+
+        if symbol.upper() == "GODREJIND":
+            _debug_symbol(symbol, "UDTS_RAW", {
+                "month_open": float(m.Open), "month_close": float(m.Close), "month_red": bool(mr),
+                "week_open": float(w.Open), "week_close": float(w.Close), "week_red": bool(wr),
+                "day_open": float(day.Open), "day_close": float(day.Close), "day_red": bool(dr),
+                "direction": direction,
+                "last_data_date": str(last_data_date.date()),
+                "is_week_complete": bool(is_week_complete), "is_month_complete": bool(is_month_complete),
+            })
 
         return {
             "Stock": symbol,
@@ -336,6 +351,25 @@ def get_live_intraday_indicators(symbol):
         long_score = sum([long_cpr, long_vwap, long_ema, long_rsi])
         short_score = sum([short_cpr, short_vwap, short_ema, short_rsi])
         confirmation = "LONG 4/4" if long_score == 4 else "SHORT 4/4" if short_score == 4 else f"L {long_score}/4 | S {short_score}/4"
+
+        if symbol.upper() == "GODREJIND":
+            _debug_symbol(symbol, "LIVE_CONFIRM", {
+                "price": price,
+                "bc": bc,
+                "tc": tc,
+                "vwap": vwap,
+                "ema21": ema21,
+                "ema34": ema34,
+                "rsi14": rsi14,
+                "short_cpr": bool(short_cpr),
+                "short_vwap": bool(short_vwap),
+                "short_ema": bool(short_ema),
+                "short_rsi": bool(short_rsi),
+                "confirmation": confirmation,
+                "short_score": short_score,
+                "long_score": long_score,
+                "target_date": str(target_date),
+            })
 
         return {
             "CPR": "ABOVE TC" if long_cpr else "BELOW BC" if short_cpr else "INSIDE",
