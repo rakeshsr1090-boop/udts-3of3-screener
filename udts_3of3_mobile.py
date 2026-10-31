@@ -1,6 +1,6 @@
 import io
 import json
-import sqlite3
+import os
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,7 +16,7 @@ import yfinance as yf
 st.set_page_config(page_title="UDTS + Independent Index F&O", page_icon="📈", layout="centered")
 
 IST = ZoneInfo("Asia/Kolkata")
-DAILY_RESULTS_DB = Path(__file__).with_name("udts_daily_results.sqlite3")
+DAILY_RESULTS_FILE = Path(__file__).with_name("udts_daily_results.json")
 NIFTY200_URLS = [
     "https://www.niftyindices.com/IndexConstituent/ind_nifty200list.csv",
     "https://archives.nseindia.com/content/indices/ind_nifty200list.csv",
@@ -34,76 +34,36 @@ def today_ist():
     return pd.Timestamp.now(tz=IST).normalize().tz_localize(None)
 
 
-def _initialize_daily_results_db(conn):
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS daily_results (
-            eod_date TEXT PRIMARY KEY,
-            scanned_at TEXT NOT NULL,
-            broader_scan INTEGER NOT NULL,
-            min_strength REAL NOT NULL,
-            results_json TEXT NOT NULL
-        )
-        """
-    )
-
-
 def save_daily_results(eod_date, scanned_at, broader_scan, min_strength, results):
-    with sqlite3.connect(DAILY_RESULTS_DB) as conn:
-        _initialize_daily_results_db(conn)
-        conn.execute(
-            """
-            INSERT INTO daily_results
-                (eod_date, scanned_at, broader_scan, min_strength, results_json)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(eod_date) DO UPDATE SET
-                scanned_at = excluded.scanned_at,
-                broader_scan = excluded.broader_scan,
-                min_strength = excluded.min_strength,
-                results_json = excluded.results_json
-            """,
-            (
-                eod_date,
-                scanned_at,
-                int(broader_scan),
-                float(min_strength),
-                json.dumps(results),
-            ),
-        )
+    snapshot = {
+        "eod_date": eod_date,
+        "scanned_at": scanned_at,
+        "broader_scan": bool(broader_scan),
+        "min_strength": float(min_strength),
+        "results": results,
+    }
+    temporary_file = DAILY_RESULTS_FILE.with_suffix(".json.tmp")
+    temporary_file.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+    temporary_file.replace(DAILY_RESULTS_FILE)
 
 
 def list_saved_daily_results():
-    with sqlite3.connect(DAILY_RESULTS_DB) as conn:
-        _initialize_daily_results_db(conn)
-        return pd.read_sql_query(
-            """
-            SELECT eod_date, scanned_at, broader_scan, min_strength
-            FROM daily_results
-            ORDER BY eod_date DESC
-            """,
-            conn,
-        )
+    if not DAILY_RESULTS_FILE.exists():
+        return pd.DataFrame(columns=["eod_date", "scanned_at", "broader_scan", "min_strength"])
+    snapshot = json.loads(DAILY_RESULTS_FILE.read_text(encoding="utf-8"))
+    return pd.DataFrame([{
+        "eod_date": snapshot["eod_date"],
+        "scanned_at": snapshot["scanned_at"],
+        "broader_scan": snapshot["broader_scan"],
+        "min_strength": snapshot["min_strength"],
+    }])
 
 
 def load_daily_results(eod_date):
-    with sqlite3.connect(DAILY_RESULTS_DB) as conn:
-        _initialize_daily_results_db(conn)
-        row = conn.execute(
-            """
-            SELECT scanned_at, broader_scan, min_strength, results_json
-            FROM daily_results
-            WHERE eod_date = ?
-            """,
-            (eod_date,),
-        ).fetchone()
-    if row is None:
+    if not DAILY_RESULTS_FILE.exists():
         return None
-    return {
-        "scanned_at": row[0],
-        "broader_scan": bool(row[1]),
-        "min_strength": row[2],
-        "results": json.loads(row[3]),
-    }
+    snapshot = json.loads(DAILY_RESULTS_FILE.read_text(encoding="utf-8"))
+    return snapshot if snapshot["eod_date"] == eod_date else None
 
 
 def broaden_symbol_universe(symbols_list):
@@ -824,6 +784,27 @@ def scan(symbol_list, nse_eod, workers=8):
     return out
 
 
+def run_scheduled_daily_scan():
+    syms = symbols()
+    if not syms:
+        raise RuntimeError("Could not load a stock universe; daily scan was not saved.")
+
+    nse_eod, eod_dt = latest_nse_eod()
+    if nse_eod is None or eod_dt is None:
+        raise RuntimeError("Could not obtain the latest NSE EOD bhavcopy; daily scan was not saved.")
+
+    eod_date = eod_dt.strftime("%Y-%m-%d")
+    saved_results = list_saved_daily_results()
+    if not saved_results.empty and saved_results.iloc[0]["eod_date"] == eod_date:
+        print(f"Results for NSE EOD date {eod_date} are already saved; nothing to update.")
+        return
+
+    results = scan(syms, nse_eod)
+    scanned_at = datetime.now(IST)
+    save_daily_results(eod_date, scanned_at.isoformat(), False, 8.0, results)
+    print(f"Saved {len(results)} stock results for NSE EOD date {eod_date}.")
+
+
 def _nse_option_session():
     session = requests.Session()
     session.headers.update({
@@ -1140,6 +1121,11 @@ def build_index_fno_table(moneyness="1-step ITM"):
             rows.append(setup)
     return pd.DataFrame(rows)
 
+if os.environ.get("UDTS_DAILY_SCAN") == "1":
+    run_scheduled_daily_scan()
+    raise SystemExit(0)
+
+
 st.title("📈 UDTS 3/3 Mobile Screener")
 st.caption("STEP 1: Strict UDTS filter — previous completed Month + Week + Day")
 
@@ -1226,7 +1212,7 @@ with st.expander("📅 Saved daily UDTS results"):
                         use_container_width=True,
                         key="download_saved_udts_results",
                     )
-    except (sqlite3.Error, json.JSONDecodeError, OSError, ValueError) as e:
+    except (json.JSONDecodeError, KeyError, OSError, ValueError) as e:
         st.error(f"Could not load saved daily results: {e}")
 
 if "results" in st.session_state:
