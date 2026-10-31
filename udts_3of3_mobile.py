@@ -1,8 +1,11 @@
 import io
+import json
+import sqlite3
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -13,6 +16,7 @@ import yfinance as yf
 st.set_page_config(page_title="UDTS + Independent Index F&O", page_icon="📈", layout="centered")
 
 IST = ZoneInfo("Asia/Kolkata")
+DAILY_RESULTS_DB = Path(__file__).with_name("udts_daily_results.sqlite3")
 NIFTY200_URLS = [
     "https://www.niftyindices.com/IndexConstituent/ind_nifty200list.csv",
     "https://archives.nseindia.com/content/indices/ind_nifty200list.csv",
@@ -28,6 +32,78 @@ NSE_HEADERS = {
 
 def today_ist():
     return pd.Timestamp.now(tz=IST).normalize().tz_localize(None)
+
+
+def _initialize_daily_results_db(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_results (
+            eod_date TEXT PRIMARY KEY,
+            scanned_at TEXT NOT NULL,
+            broader_scan INTEGER NOT NULL,
+            min_strength REAL NOT NULL,
+            results_json TEXT NOT NULL
+        )
+        """
+    )
+
+
+def save_daily_results(eod_date, scanned_at, broader_scan, min_strength, results):
+    with sqlite3.connect(DAILY_RESULTS_DB) as conn:
+        _initialize_daily_results_db(conn)
+        conn.execute(
+            """
+            INSERT INTO daily_results
+                (eod_date, scanned_at, broader_scan, min_strength, results_json)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(eod_date) DO UPDATE SET
+                scanned_at = excluded.scanned_at,
+                broader_scan = excluded.broader_scan,
+                min_strength = excluded.min_strength,
+                results_json = excluded.results_json
+            """,
+            (
+                eod_date,
+                scanned_at,
+                int(broader_scan),
+                float(min_strength),
+                json.dumps(results),
+            ),
+        )
+
+
+def list_saved_daily_results():
+    with sqlite3.connect(DAILY_RESULTS_DB) as conn:
+        _initialize_daily_results_db(conn)
+        return pd.read_sql_query(
+            """
+            SELECT eod_date, scanned_at, broader_scan, min_strength
+            FROM daily_results
+            ORDER BY eod_date DESC
+            """,
+            conn,
+        )
+
+
+def load_daily_results(eod_date):
+    with sqlite3.connect(DAILY_RESULTS_DB) as conn:
+        _initialize_daily_results_db(conn)
+        row = conn.execute(
+            """
+            SELECT scanned_at, broader_scan, min_strength, results_json
+            FROM daily_results
+            WHERE eod_date = ?
+            """,
+            (eod_date,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "scanned_at": row[0],
+        "broader_scan": bool(row[1]),
+        "min_strength": row[2],
+        "results": json.loads(row[3]),
+    }
 
 
 def broaden_symbol_universe(symbols_list):
@@ -1086,8 +1162,17 @@ if st.button("🔄 SCAN UDTS ONLY", type="primary", use_container_width=True):
             st.error("Could not obtain the latest NSE EOD bhavcopy. Scan stopped so stale daily data is not used.")
         else:
             with st.spinner(f"Scanning {len(syms)} stocks for UDTS 3/3..."):
-                st.session_state.results = scan(syms, nse_eod, workers)
-            st.session_state.scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+                results = scan(syms, nse_eod, workers)
+            scan_time = datetime.now(IST)
+            save_daily_results(
+                eod_dt.strftime("%Y-%m-%d"),
+                scan_time.isoformat(),
+                broader_scan,
+                min_strength,
+                results,
+            )
+            st.session_state.results = results
+            st.session_state.scan_time = scan_time.strftime("%d-%b-%Y %H:%M:%S IST")
             st.session_state.eod_date = eod_dt.strftime("%d-%b-%Y")
             st.session_state.confirm_results = None
             st.session_state.confirm_scan_time = None
@@ -1097,6 +1182,52 @@ if st.button("🔄 SCAN UDTS ONLY", type="primary", use_container_width=True):
             st.session_state.min_strength = min_strength
     except Exception as e:
         st.error(f"UDTS scan failed: {e}")
+
+with st.expander("📅 Saved daily UDTS results"):
+    try:
+        saved_days = list_saved_daily_results()
+        if saved_days.empty:
+            st.info("No daily results have been saved yet. Run a UDTS scan to create the first snapshot.")
+        else:
+            selected_date = st.selectbox(
+                "Choose an NSE EOD date",
+                saved_days["eod_date"].tolist(),
+                format_func=lambda value: pd.Timestamp(value).strftime("%d-%b-%Y"),
+                key="saved_udts_date",
+            )
+            saved_result = load_daily_results(selected_date)
+            if saved_result is None:
+                st.error("The selected saved result could not be found.")
+            else:
+                st.caption(
+                    f"Scanned: {pd.Timestamp(saved_result['scanned_at']).strftime('%d-%b-%Y %H:%M:%S %Z')} | "
+                    f"Broader scan: {'ON' if saved_result['broader_scan'] else 'OFF'} | "
+                    f"Minimum strength: {saved_result['min_strength']:.1f}"
+                )
+                saved_df = pd.DataFrame(saved_result["results"])
+                if saved_df.empty:
+                    st.info("The saved scan had no matching stocks.")
+                else:
+                    history_cols = ["Stock", "Month", "Week", "Day", "Direction", "Price", "EOD Date"]
+                    history_df = saved_df[history_cols].sort_values(["Direction", "Stock"])
+                    st.dataframe(
+                        history_df,
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={
+                            "Price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f")
+                        },
+                    )
+                    st.download_button(
+                        "⬇️ Download saved daily results",
+                        history_df.to_csv(index=False).encode(),
+                        f"udts_results_{selected_date}.csv",
+                        "text/csv",
+                        use_container_width=True,
+                        key="download_saved_udts_results",
+                    )
+    except (sqlite3.Error, json.JSONDecodeError, OSError, ValueError) as e:
+        st.error(f"Could not load saved daily results: {e}")
 
 if "results" in st.session_state:
     df = pd.DataFrame(st.session_state.results)
