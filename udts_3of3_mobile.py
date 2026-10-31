@@ -48,7 +48,6 @@ def symbols():
         }
     )
 
-    # Prime the main site first for some sites that issue cookies/anti-bot checks.
     try:
         session.get("https://www.niftyindices.com/", timeout=20)
     except Exception:
@@ -73,8 +72,6 @@ def symbols():
         except Exception:
             continue
 
-    # Final fallback: use the F&O universe from NSE lot-size file so the screener still runs
-    # even when Nifty Indices blocks automated access.
     fallback = nse_fno_lot_sizes()
     if fallback:
         return sorted(fallback.keys())
@@ -85,7 +82,6 @@ def _parse_nse_frame(df):
     """Normalize NSE UDiFF or legacy full-bhavcopy columns."""
     cols = {str(c).strip(): c for c in df.columns}
 
-    # Current UDiFF Common Bhavcopy format.
     if "TckrSymb" in cols and "SctySrs" in cols:
         out = df.rename(
             columns={
@@ -98,7 +94,6 @@ def _parse_nse_frame(df):
                 cols["ClsPric"]: "Close",
             }
         )
-    # Legacy NSE full bhavdata format.
     else:
         lookup = {str(c).strip().upper(): c for c in df.columns}
         required = [
@@ -132,26 +127,19 @@ def _parse_nse_frame(df):
 
 
 def _download_nse_bhavcopy(dt):
-    """Download one NSE end-of-day bhavcopy. Returns normalized rows or None."""
     ymd = dt.strftime("%Y%m%d")
     ddmmyyyy = dt.strftime("%d%m%Y")
-
     urls = [
-        # Current UDiFF common bhavcopy.
         f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{ymd}_F_0000.csv.zip",
-        # Legacy/full bhavdata fallback.
         f"https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{ddmmyyyy}.csv",
     ]
-
     session = requests.Session()
     session.headers.update(NSE_HEADERS)
-
     for url in urls:
         try:
             r = session.get(url, timeout=20)
             if r.status_code != 200 or not r.content:
                 continue
-
             if url.endswith(".zip"):
                 with zipfile.ZipFile(io.BytesIO(r.content)) as z:
                     names = [n for n in z.namelist() if n.lower().endswith(".csv")]
@@ -161,33 +149,22 @@ def _download_nse_bhavcopy(dt):
                         raw = pd.read_csv(f)
             else:
                 raw = pd.read_csv(io.BytesIO(r.content))
-
             parsed = _parse_nse_frame(raw)
             if parsed.empty:
                 continue
-
             parsed = parsed[parsed["Date"] == pd.Timestamp(dt)]
             if not parsed.empty:
                 return parsed
         except Exception:
             continue
-
     return None
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def latest_nse_eod():
-    """Find the latest completed NSE EOD bhavcopy.
-
-    During market hours, today's candle is still incomplete, so start from the
-    previous calendar day. After the normal NSE equity session is over, start
-    with today so the scanner uses today's completed EOD candle as soon as NSE
-    publishes the bhavcopy. Weekends/holidays are handled by searching back.
-    """
     now = today_ist()
     current_time = pd.Timestamp.now(tz=IST).time()
     start_offset = 0 if current_time >= datetime.strptime("16:00", "%H:%M").time() else 1
-
     for i in range(start_offset, 8):
         dt = now - pd.Timedelta(days=i)
         data = _download_nse_bhavcopy(dt)
@@ -306,7 +283,6 @@ def get_udts(symbol, nse_eod):
 
 
 def get_latest_price(symbol):
-    """Get latest available 5-minute price for an UDTS-passed stock."""
     try:
         x = yf.download(
             symbol + ".NS",
@@ -329,13 +305,6 @@ def get_latest_price(symbol):
 
 
 def get_intraday_indicators(symbol):
-    """Calculate CPR -> VWAP -> EMA 21/34 -> RSI(14) using ONLY completed sessions up to the latest completed trading day.
-
-    IMPORTANT: today's intraday candles are never used.  If today is a trading
-    day, the indicator snapshot is based on yesterday's completed session.
-    On weekends/holidays it automatically uses the most recent completed
-    trading session before today.
-    """
     try:
         x = yf.download(
             symbol + ".NS",
@@ -361,7 +330,6 @@ def get_intraday_indicators(symbol):
         if x.empty:
             return None
 
-        # STRICT RULE: exclude every bar belonging to today's IST date.
         today = today_ist().date()
         completed = x[x.index.date < today].copy()
         if completed.empty:
@@ -371,7 +339,6 @@ def get_intraday_indicators(symbol):
         if len(dates) < 2:
             return None
 
-        # "Yesterday" = latest completed trading session available before today.
         target_date = dates[-1]
         prev_date = dates[-2]
 
@@ -380,7 +347,6 @@ def get_intraday_indicators(symbol):
         if session.empty or prev.empty:
             return None
 
-        # CPR for the target session is based on the previous completed day's OHLC.
         ph = float(prev["High"].max())
         pl = float(prev["Low"].min())
         pc = float(prev["Close"].iloc[-1])
@@ -390,7 +356,6 @@ def get_intraday_indicators(symbol):
         tc = 2.0 * pivot - bc
         tc, bc = max(tc, bc), min(tc, bc)
 
-        # VWAP for the target completed session (yesterday), NOT today's session.
         typical = (session["High"] + session["Low"] + session["Close"]) / 3.0
         vol = pd.to_numeric(session["Volume"], errors="coerce").fillna(0)
         if float(vol.sum()) > 0:
@@ -398,7 +363,6 @@ def get_intraday_indicators(symbol):
         else:
             vwap = float(session["Close"].iloc[-1])
 
-        # EMA and RSI are calculated using data only through the target session.
         history = completed[completed.index.date <= target_date].copy()
         close = history["Close"].astype(float)
         ema21 = float(close.ewm(span=21, adjust=False).mean().iloc[-1])
@@ -487,13 +451,6 @@ def get_intraday_indicators(symbol):
 
 
 def get_live_intraday_indicators(symbol):
-    """Live Step-2 snapshot using today's completed 15-minute bars.
-
-    During market hours: today's in-progress 15m candle is excluded, but
-    today's completed 15m candles are included. After market close, the full
-    current day's completed session is used. CPR uses the previous completed
-    trading day's OHLC; today's session VWAP is used for live confirmation.
-    """
     try:
         x = yf.download(
             symbol + ".NS", period="30d", interval="15m",
@@ -624,7 +581,31 @@ def get_live_intraday_indicators(symbol):
         return None
 
 
-def add_live_confirmation_filter(df):
+def parse_confirmation_strength(label):
+    if label is None:
+        return 0
+    text = str(label).upper().replace(" ", "")
+    if "4/4" in text:
+        return 4
+    if "3/4" in text:
+        return 3
+    if "2/4" in text:
+        return 2
+    if "1/4" in text:
+        return 1
+    if "L" in text and "S" in text and "|" in text:
+        try:
+            left = text.split("L")[1].split("|")[0]
+            right = text.split("S")[1]
+            a = int(left.split("/")[0]) if left.split("/")[0].isdigit() else 0
+            b = int(right.split("/")[0]) if right.split("/")[0].isdigit() else 0
+            return max(a, b)
+        except Exception:
+            pass
+    return 0
+
+
+def add_live_confirmation_filter(df, min_strength=8.0, require_4_4=True):
     if df.empty:
         return df
     indicators = {}
@@ -638,34 +619,36 @@ def add_live_confirmation_filter(df):
                 indicators[s] = None
 
     result = df.copy()
-    fields = ["CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Avg Traded Value (₹)",
-              "Target Traded Value (₹)", "CPR Pivot", "CPR TC", "CPR BC", "VWAP Value",
-              "EMA 21", "EMA 34", "Confirm Score", "Confirmation", "Indicator Date",
-              "Indicator TF", "Live Price"]
-    for field in fields:
+    for field in ["CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Avg Traded Value (₹)",
+                  "Target Traded Value (₹)", "CPR Pivot", "CPR TC", "CPR BC", "VWAP Value",
+                  "EMA 21", "EMA 34", "Confirm Score", "Confirmation", "Indicator Date",
+                  "Indicator TF", "Live Price"]:
         result[field] = result["Stock"].map(lambda s: indicators.get(s, {}).get(field) if indicators.get(s) else None)
 
+    result["ConfirmationStrength"] = result["Confirmation"].apply(parse_confirmation_strength)
+    if require_4_4:
+        result["Confirmed"] = result.apply(
+            lambda r: (r["Direction"] == "LONG" and r.get("ConfirmationStrength", 0) >= 4) or
+            (r["Direction"] == "SHORT" and r.get("ConfirmationStrength", 0) >= 4),
+            axis=1,
+        )
+    else:
+        result["Confirmed"] = result.apply(
+            lambda r: (r["Direction"] == "LONG" and r.get("ConfirmationStrength", 0) >= 2) or
+            (r["Direction"] == "SHORT" and r.get("ConfirmationStrength", 0) >= 2),
+            axis=1,
+        )
     result["Price"] = result["Live Price"].fillna(result["Price"])
 
-    result["Confirmed"] = result.apply(
-        lambda r: (r["Direction"] == "LONG" and r.get("Confirmation") == "LONG 4/4") or
-                  (r["Direction"] == "SHORT" and r.get("Confirmation") == "SHORT 4/4"), axis=1
-    )
     scored = result.apply(calculate_strength_score, axis=1, result_type="expand")
     scored.columns = ["Strength Score", "Mandatory Gate"]
     result[["Strength Score", "Mandatory Gate"]] = scored
     result["Grade"] = result["Strength Score"].apply(lambda v: "A+" if v >= 9 else "A" if v >= 8 else "B" if v >= 7 else "C" if v >= 6 else "D")
-    result["Trade Candidate"] = result.apply(lambda r: bool(r["Mandatory Gate"]) and float(r["Strength Score"]) >= 8.0, axis=1)
+    result["Trade Candidate"] = result.apply(lambda r: bool(r["Mandatory Gate"]) and float(r["Strength Score"]) >= min_strength and bool(r["Confirmed"]), axis=1)
     return result
 
 
 def calculate_strength_score(row):
-    """10-point ranking score applied after UDTS 3/3.
-
-    CPR 2 + VWAP 2 + EMA21/34 2 + RSI 1 + RVOL 1.5 + ADX 1 +
-    Liquidity 0.5. CPR and VWAP are mandatory gates for the final trade
-    candidate; the score itself is a ranking aid, not a buy guarantee.
-    """
     direction = row.get("Direction")
     score = 0.0
     if direction == "LONG":
@@ -699,8 +682,7 @@ def calculate_strength_score(row):
     return round(score, 1), gate
 
 
-def add_confirmation_filter(df, only_confirmed=False):
-    """Add CPR/VWAP/EMA/RSI columns without changing the UDTS 3/3 result."""
+def add_confirmation_filter(df, only_confirmed=False, min_strength=8.0, require_4_4=True):
     if df.empty:
         return df
     indicators = {}
@@ -723,14 +705,19 @@ def add_confirmation_filter(df, only_confirmed=False):
             lambda s: indicators.get(s, {}).get(field) if indicators.get(s) else None
         )
 
-    result["Confirmed"] = result.apply(
-        lambda r: (
-            r["Direction"] == "LONG" and r.get("Confirmation") == "LONG 4/4"
-        ) or (
-            r["Direction"] == "SHORT" and r.get("Confirmation") == "SHORT 4/4"
-        ),
-        axis=1,
-    )
+    result["ConfirmationStrength"] = result["Confirmation"].apply(parse_confirmation_strength)
+    if require_4_4:
+        result["Confirmed"] = result.apply(
+            lambda r: (r["Direction"] == "LONG" and r.get("ConfirmationStrength", 0) >= 4) or
+            (r["Direction"] == "SHORT" and r.get("ConfirmationStrength", 0) >= 4),
+            axis=1,
+        )
+    else:
+        result["Confirmed"] = result.apply(
+            lambda r: (r["Direction"] == "LONG" and r.get("ConfirmationStrength", 0) >= 2) or
+            (r["Direction"] == "SHORT" and r.get("ConfirmationStrength", 0) >= 2),
+            axis=1,
+        )
 
     scored = result.apply(calculate_strength_score, axis=1, result_type="expand")
     scored.columns = ["Strength Score", "Mandatory Gate"]
@@ -739,7 +726,7 @@ def add_confirmation_filter(df, only_confirmed=False):
         lambda v: "A+" if v >= 9 else "A" if v >= 8 else "B" if v >= 7 else "C" if v >= 6 else "D"
     )
     result["Trade Candidate"] = result.apply(
-        lambda r: bool(r["Mandatory Gate"]) and float(r["Strength Score"]) >= 8.0, axis=1
+        lambda r: bool(r["Mandatory Gate"]) and float(r["Strength Score"]) >= min_strength and bool(r["Confirmed"]), axis=1
     )
     if only_confirmed:
         result = result[result["Confirmed"]].copy()
@@ -757,9 +744,7 @@ def scan(symbol_list, nse_eod, workers=8):
     return out
 
 
-# F&O SECTION ---------------------------------------------------------------
 def _nse_option_session():
-    """Create one browser-like NSE session to reuse across all stock requests."""
     session = requests.Session()
     session.headers.update({
         **NSE_HEADERS,
@@ -773,7 +758,6 @@ def _nse_option_session():
 
 
 def nse_option_chain(symbol, session):
-    """Fetch one stock option chain using a shared cookie-initialized session."""
     url = "https://www.nseindia.com/api/option-chain-equities"
     last_error = None
     for attempt in range(3):
@@ -798,7 +782,6 @@ def _n(v):
 
 
 def _option_lot_size(*options):
-    """Read the exchange lot size when NSE includes it in the option chain."""
     for option in options:
         if not option:
             continue
@@ -811,7 +794,6 @@ def _option_lot_size(*options):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def nse_fno_lot_sizes():
-    """Get current exchange-defined stock F&O lot sizes (best-effort)."""
     try:
         response = requests.get(
             "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv",
@@ -835,7 +817,6 @@ def nse_fno_lot_sizes():
 
 
 def fno_pick(symbol, lot_sizes, session):
-    """Return the nearest-expiry ATM CE and PE for one UDTS-qualified stock."""
     data=nse_option_chain(symbol, session); rec=data.get("records",{})
     spot=_n(rec.get("underlyingValue")); rows=rec.get("data",[])
     if spot is None or not rows: return None
@@ -858,7 +839,6 @@ def fno_pick(symbol, lot_sizes, session):
     ce, pe = contract.get("CE"), contract.get("PE")
     ce_price = _n(ce.get("lastPrice")) if ce else None
     pe_price = _n(pe.get("lastPrice")) if pe else None
-    # A stock is F&O-eligible here only when NSE provides an ATM option quote.
     if not any(price and price > 0 for price in (ce_price, pe_price)):
         return None
     return {
@@ -869,18 +849,20 @@ def fno_pick(symbol, lot_sizes, session):
     }
 
 
-def build_fno_candidates(df):
-    """Fetch F&O data for the 15 best fully-confirmed Grade A+ candidates."""
+def build_fno_candidates(df, min_strength=9.0, require_4_4=True):
     if df.empty: return pd.DataFrame()
-    confirmed = (
-        ((df["Direction"] == "LONG") & (df["Confirmation"] == "LONG 4/4")) |
-        ((df["Direction"] == "SHORT") & (df["Confirmation"] == "SHORT 4/4"))
-    )
+    if "ConfirmationStrength" not in df.columns:
+        df = df.copy()
+        df["ConfirmationStrength"] = df["Confirmation"].apply(parse_confirmation_strength)
+    if require_4_4:
+        confirmed = df["ConfirmationStrength"] >= 4
+    else:
+        confirmed = df["ConfirmationStrength"] >= 2
     sel = df[
-        df["Direction"].isin(["LONG", "SHORT"])
-        & confirmed
-        & (df["Grade"] == "A+")
-        & (pd.to_numeric(df["Strength Score"], errors="coerce") >= 9.0)
+        df["Direction"].isin(["LONG", "SHORT"]) &
+        confirmed &
+        (df["Grade"] == "A+") &
+        (pd.to_numeric(df["Strength Score"], errors="coerce") >= min_strength)
     ].copy()
     if sel.empty: return pd.DataFrame()
     sel = sel.sort_values(["ADX", "RVOL"], ascending=[False, False])
@@ -903,14 +885,9 @@ def build_fno_candidates(df):
         time.sleep(0.25)
     return pd.DataFrame(out).sort_values("Stock") if out else pd.DataFrame()
 
-# STEP 4 — INDEX F&O INTRADAY SYSTEM --------------------------------------------
+
 @st.cache_data(ttl=45, show_spinner=False)
 def get_index_fno_setup(symbol, option_moneyness="1-step ITM"):
-    """Live NIFTY/BANKNIFTY setup using completed 15m + 5m bars.
-    Direction: 15m trend -> CPR/previous-day levels -> VWAP -> EMA21/34 -> RSI.
-    Entry confirmation: completed 5m breakout + retest of the prior completed
-    5m high/low or previous-day high/low. Current in-progress bars are excluded.
-    """
     try:
         ticker = "^NSEI" if symbol == "NIFTY" else "^NSEBANK"
         x = yf.download(ticker, period="10d", interval="5m",
@@ -1091,6 +1068,12 @@ st.caption("STEP 1: Strict UDTS filter — previous completed Month + Week + Day
 
 with st.expander("⚙️ Settings"):
     workers = st.slider("Parallel downloads", 2, 12, 8)
+    scan_mode = st.radio(
+        "Scan style",
+        ["Strict 4/4 only", "Broader similar-stock scan"],
+        horizontal=True,
+        key="scan_mode",
+    )
 
 st.markdown("**LONG:** 🟢 Month + 🟢 Week + 🟢 Day")
 st.markdown("**SHORT:** 🔴 Month + 🔴 Week + 🔴 Day")
@@ -1111,10 +1094,10 @@ if st.button("🔄 SCAN UDTS ONLY", type="primary", use_container_width=True):
             st.session_state.confirm_scan_time = None
             st.session_state.fno_results = None
             st.session_state.fno_scan_time = None
+            st.session_state.scan_mode = scan_mode
     except Exception as e:
         st.error(f"UDTS scan failed: {e}")
 
-# STEP 1 DISPLAY --------------------------------------------------------------
 if "results" in st.session_state:
     df = pd.DataFrame(st.session_state.results)
     if not df.empty:
@@ -1140,82 +1123,90 @@ if "results" in st.session_state:
             st.dataframe(mixed[["Stock", "Month", "Week", "Day", "Direction", "EOD Date"]], hide_index=True, use_container_width=True)
         st.download_button("⬇️ Download UDTS 3/3 List", passed_udts[udts_cols].to_csv(index=False).encode(), "udts_3of3_list.csv", "text/csv", use_container_width=True)
 
-        # STEP 2 — LIVE CONFIRMATION ------------------------------------------
         st.divider()
         st.subheader("🎯 STEP 2 — LIVE CPR → VWAP → EMA 21/34 → RSI")
         st.caption("Uses ONLY UDTS-passed stocks above. It does NOT rescan NIFTY 200.")
-        st.caption("During market hours: latest completed 15-minute candle + current price. Today's in-progress 15m candle is excluded. After market close, today's full completed session is used.")
+        current_scan_mode = st.session_state.get("scan_mode", scan_mode)
+        if current_scan_mode == "Broader similar-stock scan":
+            st.caption("Broader mode: allows 2/4 or 3/4 live confirmation and lowers the strength threshold to 7 so you catch more Godrej-like setups.")
+            min_strength = 7.0
+            require_4_4 = False
+        else:
+            st.caption("Strict mode: only 4/4 live confirmation and strength threshold ≥8 are considered.")
+            min_strength = 8.0
+            require_4_4 = True
 
         if st.button("🔄 REFRESH LIVE CONFIRMATION", use_container_width=True):
             try:
                 with st.spinner(f"Refreshing Step 2 for {len(passed_udts)} UDTS-passed stocks..."):
-                    confirm_df = add_live_confirmation_filter(passed_udts.copy())
+                    confirm_df = add_live_confirmation_filter(passed_udts.copy(), min_strength=min_strength, require_4_4=require_4_4)
                 st.session_state.confirm_results = confirm_df
                 st.session_state.confirm_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
                 st.session_state.fno_results = None
                 st.session_state.fno_scan_time = None
+                st.session_state.scan_mode = current_scan_mode
             except Exception as e:
                 st.error(f"Live confirmation refresh failed: {e}")
 
         if st.session_state.get("confirm_results") is not None:
             confirm_df = st.session_state.confirm_results.copy()
-            longs_confirm = confirm_df[confirm_df.Direction == "LONG"].sort_values(["Trade Candidate", "Strength Score", "Confirm Score", "Stock"], ascending=[False, False, False, True])
-            shorts_confirm = confirm_df[confirm_df.Direction == "SHORT"].sort_values(["Trade Candidate", "Strength Score", "Confirm Score", "Stock"], ascending=[False, False, False, True])
-            x, y, z, q = st.columns(4)
-            x.metric("UDTS stocks checked", len(confirm_df)); y.metric("🏆 8+ /10", int((confirm_df["Strength Score"] >= 8).sum())); z.metric("🟢 LONG 4/4", int((confirm_df["Confirmation"] == "LONG 4/4").sum())); q.metric("🔴 SHORT 4/4", int((confirm_df["Confirmation"] == "SHORT 4/4").sum()))
-            st.caption("Last live confirmation refresh: " + st.session_state.confirm_scan_time)
-            st.caption("Indicator timeframe: 15-minute LIVE | Current completed 15m bars included; current in-progress bar excluded")
-
-            confirm_cols = ["Stock", "Direction", "Price", "CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Confirm Score", "Strength Score", "Grade", "Mandatory Gate", "Trade Candidate", "Confirmation"]
-            st.markdown("**🟢 LONG confirmation candidates**")
-            st.dataframe(longs_confirm[confirm_cols], hide_index=True, use_container_width=True,
-                         column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%.0f")})
-            st.markdown("**🔴 SHORT confirmation candidates**")
-            st.dataframe(shorts_confirm[confirm_cols], hide_index=True, use_container_width=True,
-                         column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%.0f")})
-            st.caption("10/10 ranking: CPR 2 + VWAP 2 + EMA 21/34 2 + RSI 1 + RVOL 1.5 + ADX 1 + Liquidity 0.5. CPR + VWAP are mandatory gates and score ≥8/10 is the trade-candidate threshold. This is a ranking aid only, not a guarantee.")
-            st.download_button("⬇️ Download UDTS-passed + LIVE Confirmation List", confirm_df[confirm_cols].to_csv(index=False).encode(), "udts_3of3_live_confirmation.csv", "text/csv", use_container_width=True)
-
-            # STEP 3 — Fetch live option-chain data only after Step 2 is reviewed.
-            st.divider()
-            st.subheader("🏦 STEP 3 — TOP 15 F&O CONTRACTS")
-            st.caption("Fetches only up to 15 stocks meeting: Grade A+, Strength Score ≥9, and matching LONG/SHORT 4/4 confirmation. They are ranked by ADX, then RVOL. No capital or stock-price cap filter is applied beyond the screen rules.")
-            if st.button("🔄 FETCH TOP 15 F&O DETAILS", use_container_width=True):
-                try:
-                    with st.spinner("Getting NSE lot sizes and ATM option prices for the top 15 candidates..."):
-                        st.session_state.fno_results = build_fno_candidates(confirm_df.copy())
-                    st.session_state.fno_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
-                except Exception as e:
-                    st.error(f"F&O details refresh failed: {e}")
-
-            if st.session_state.get("fno_results") is not None:
-                fno_df = st.session_state.fno_results.copy()
-                st.caption("Last F&O refresh: " + st.session_state.fno_scan_time)
-                if fno_df.empty:
-                    st.warning("NSE did not return usable ATM option quotes for the eligible candidates. Try again shortly.")
-                else:
-                    fno_cols = ["Stock", "Direction", "Strength Score", "Grade", "ADX", "RVOL", "Expiry", "Underlying", "ATM Strike", "Lot Size", "CE-ATM Price - Long", "PE-ATM Price - Short"]
-                    st.dataframe(fno_df[fno_cols], hide_index=True, use_container_width=True,
-                        column_config={
-                            "Strength Score": st.column_config.NumberColumn("Strength", format="%.1f/10"),
-                            "ADX": st.column_config.NumberColumn("ADX", format="%.2f"),
-                            "RVOL": st.column_config.NumberColumn("RVOL", format="%.2f"),
-                            "Underlying": st.column_config.NumberColumn("Underlying (₹)", format="₹%.2f"),
-                            "ATM Strike": st.column_config.NumberColumn("ATM Strike (₹)", format="₹%.2f"),
-                            "Lot Size": st.column_config.NumberColumn("Lot Size", format="%d"),
-                            "CE-ATM Price - Long": st.column_config.NumberColumn("CE-ATM Price - Long (₹)", format="₹%.2f"),
-                            "PE-ATM Price - Short": st.column_config.NumberColumn("PE-ATM Price - Short (₹)", format="₹%.2f"),
-                        })
-                    st.download_button("⬇️ Download Top 15 F&O Details", fno_df.to_csv(index=False).encode(), "udts_top15_fno_details.csv", "text/csv", use_container_width=True)
-
+        elif current_scan_mode == "Broader similar-stock scan":
+            confirm_df = add_live_confirmation_filter(passed_udts.copy(), min_strength=min_strength, require_4_4=require_4_4)
         else:
-            st.info("UDTS is ready. Tap **REFRESH LIVE CONFIRMATION** during market hours for the current Step-2 setup.")
+            confirm_df = add_live_confirmation_filter(passed_udts.copy(), min_strength=min_strength, require_4_4=require_4_4)
+
+        longs_confirm = confirm_df[confirm_df.Direction == "LONG"].sort_values(["Trade Candidate", "Strength Score", "Confirm Score", "Stock"], ascending=[False, False, False, True])
+        shorts_confirm = confirm_df[confirm_df.Direction == "SHORT"].sort_values(["Trade Candidate", "Strength Score", "Confirm Score", "Stock"], ascending=[False, False, False, True])
+        x, y, z, q = st.columns(4)
+        x.metric("UDTS stocks checked", len(confirm_df)); y.metric("🏆 7+/10", int((confirm_df["Strength Score"] >= 7).sum())); z.metric("🟢 LONG 4/4", int((confirm_df["Confirmation"] == "LONG 4/4").sum())); q.metric("🔴 SHORT 4/4", int((confirm_df["Confirmation"] == "SHORT 4/4").sum()))
+        st.caption("Last live confirmation refresh: " + st.session_state.get("confirm_scan_time", "—"))
+        st.caption("Indicator timeframe: 15-minute LIVE | Current completed 15m bars included; current in-progress bar excluded")
+
+        confirm_cols = ["Stock", "Direction", "Price", "CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Confirm Score", "Strength Score", "Grade", "Mandatory Gate", "Trade Candidate", "Confirmation"]
+        st.markdown("**🟢 LONG confirmation candidates**")
+        st.dataframe(longs_confirm[confirm_cols], hide_index=True, use_container_width=True,
+                     column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%.0f")})
+        st.markdown("**🔴 SHORT confirmation candidates**")
+        st.dataframe(shorts_confirm[confirm_cols], hide_index=True, use_container_width=True,
+                     column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%.0f")})
+        st.caption("10/10 ranking: CPR 2 + VWAP 2 + EMA 21/34 2 + RSI 1 + RVOL 1.5 + ADX 1 + Liquidity 0.5. CPR + VWAP are mandatory gates and score ≥7/10 in Broader mode is used to widen the list beyond exact 4/4 turnarounds.")
+        st.download_button("⬇️ Download UDTS-passed + LIVE Confirmation List", confirm_df[confirm_cols].to_csv(index=False).encode(), "udts_3of3_live_confirmation.csv", "text/csv", use_container_width=True)
+
+        st.divider()
+        st.subheader("🏦 STEP 3 — TOP 15 F&O CONTRACTS")
+        st.caption("Fetches only up to 15 stocks meeting: Grade A+, Strength Score threshold, and matching LONG/SHORT confirmation. In Broader mode the confirmation threshold is lowered so you see more similar setups instead of only exact 4/4 turns.")
+        if st.button("🔄 FETCH TOP 15 F&O DETAILS", use_container_width=True):
+            try:
+                with st.spinner("Getting NSE lot sizes and ATM option prices for the top 15 candidates..."):
+                    st.session_state.fno_results = build_fno_candidates(confirm_df.copy(), min_strength=min_strength, require_4_4=require_4_4)
+                st.session_state.fno_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+            except Exception as e:
+                st.error(f"F&O details refresh failed: {e}")
+
+        if st.session_state.get("fno_results") is not None:
+            fno_df = st.session_state.fno_results.copy()
+            st.caption("Last F&O refresh: " + st.session_state.fno_scan_time)
+            if fno_df.empty:
+                st.warning("NSE did not return usable ATM option quotes for the eligible candidates. Try again shortly.")
+            else:
+                fno_cols = ["Stock", "Direction", "Strength Score", "Grade", "ADX", "RVOL", "Expiry", "Underlying", "ATM Strike", "Lot Size", "CE-ATM Price - Long", "PE-ATM Price - Short"]
+                st.dataframe(fno_df[fno_cols], hide_index=True, use_container_width=True,
+                    column_config={
+                        "Strength Score": st.column_config.NumberColumn("Strength", format="%.1f/10"),
+                        "ADX": st.column_config.NumberColumn("ADX", format="%.2f"),
+                        "RVOL": st.column_config.NumberColumn("RVOL", format="%.2f"),
+                        "Underlying": st.column_config.NumberColumn("Underlying (₹)", format="₹%.2f"),
+                        "ATM Strike": st.column_config.NumberColumn("ATM Strike (₹)", format="₹%.2f"),
+                        "Lot Size": st.column_config.NumberColumn("Lot Size", format="%d"),
+                        "CE-ATM Price - Long": st.column_config.NumberColumn("CE-ATM Price - Long (₹)", format="₹%.2f"),
+                        "PE-ATM Price - Short": st.column_config.NumberColumn("PE-ATM Price - Short (₹)", format="₹%.2f"),
+                    })
+                st.download_button("⬇️ Download Top 15 F&O Details", fno_df.to_csv(index=False).encode(), "udts_top15_fno_details.csv", "text/csv", use_container_width=True)
     else:
         st.warning("No stock data returned.")
 else:
     st.info("Tap **SCAN UDTS ONLY** to get the current 3/3 list.")
 
-# STEP 4 — INDEX F&O INTRADAY SYSTEM (fully independent module) --------------
 st.divider()
 st.subheader("📊 INDEX F&O TRADING — INDEPENDENT MODULE")
 st.caption("Standalone NIFTY/BANKNIFTY intraday module — completely independent of UDTS Steps 1–3. Refresh this directly without running UDTS.")
@@ -1258,3 +1249,4 @@ else:
     st.info("Tap **REFRESH INDEX F&O SETUP** to get the current NIFTY/BANKNIFTY setup — no UDTS scan needed.")
 
 st.caption("Day candle is sourced from NSE EOD bhavcopy; Yahoo Finance is used for historical context, 15-minute bars and current price. The scanner implements the 3/3 candle rule you specified and is designed to work without depending on Nifty Indices' anti-bot CSV endpoint.")
+
