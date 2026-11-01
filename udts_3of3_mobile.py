@@ -27,6 +27,32 @@ NIFTY500_URLS = [
     "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
     "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv",
 ]
+SECTOR_INDICES = {
+    "NIFTY Bank": "^NSEBANK",
+    "NIFTY Financial Services": "^CNXFINANCE",
+    "NIFTY IT": "^CNXIT",
+    "NIFTY Auto": "^CNXAUTO",
+    "NIFTY FMCG": "^CNXFMCG",
+    "NIFTY Pharma": "^CNXPHARMA",
+    "NIFTY Metal": "^CNXMETAL",
+    "NIFTY Realty": "^CNXREALTY",
+    "NIFTY Energy": "^CNXENERGY",
+    "NIFTY Infrastructure": "^CNXINFRA",
+    "NIFTY Media": "^CNXMEDIA",
+}
+SECTOR_INDUSTRY_KEYWORDS = {
+    "Banks": ("bank",),
+    "Financial Services": ("financial", "finance", "insurance", "capital market", "investment"),
+    "IT": ("software", "information technology", "it services", "technology"),
+    "Auto": ("automobile", "auto ", "auto-", "tyre", "two wheel", "passenger car", "commercial vehicle"),
+    "FMCG": ("fmcg", "consumer staples", "personal care", "food product", "beverage", "tobacco"),
+    "Pharma": ("pharma", "healthcare", "hospital", "diagnostic", "biotech", "medical equipment"),
+    "Metal": ("metal", "steel", "aluminium", "aluminum", "copper", "mining"),
+    "Realty": ("real estate", "realty"),
+    "Energy": ("energy", "oil", "gas", "power", "petroleum", "utility", "renewable"),
+    "Infrastructure": ("infrastructure", "construction", "cement", "capital goods", "industrial", "engineering"),
+    "Media": ("media", "entertainment", "broadcast", "publishing"),
+}
 NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/139 Safari/537.36",
     "Accept": "*/*",
@@ -187,6 +213,191 @@ def add_nse_industry(df, industry_by_symbol):
         result["Stock"].astype(str).str.strip().str.upper()
         .map(industry_by_symbol)
         .fillna("Not classified")
+    )
+    return result
+
+
+def _sector_for_industry(industry):
+    normalized = str(industry).strip().lower()
+    for sector, keywords in SECTOR_INDUSTRY_KEYWORDS.items():
+        if any(keyword in normalized for keyword in keywords):
+            return sector
+    return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def yahoo_daily_close_history(tickers):
+    """Fetch cached daily closes in batches to keep Yahoo requests bounded."""
+    tickers = tuple(dict.fromkeys(tickers))
+    if not tickers:
+        return pd.DataFrame()
+
+    batches = [tickers[i:i + 60] for i in range(0, len(tickers), 60)]
+    closes_by_ticker = {}
+    failed_batches = []
+
+    def download_batch(batch):
+        return yf.download(
+            tickers=list(batch),
+            period="1y",
+            interval="1d",
+            auto_adjust=True,
+            group_by="ticker",
+            progress=False,
+            threads=False,
+            timeout=30,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(download_batch, batch): batch for batch in batches}
+        for future in as_completed(futures):
+            batch = futures[future]
+            try:
+                prices = future.result()
+            except Exception as error:
+                failed_batches.append(f"{len(batch)} tickers ({type(error).__name__})")
+                continue
+            if prices.empty:
+                continue
+
+            if isinstance(prices.columns, pd.MultiIndex):
+                for ticker in batch:
+                    close_column = next(
+                        (
+                            column for column in prices.columns
+                            if ticker in tuple(str(part) for part in column)
+                            and "Close" in tuple(str(part) for part in column)
+                        ),
+                        None,
+                    )
+                    if close_column is not None:
+                        closes_by_ticker[ticker] = prices[close_column].dropna()
+            elif len(batch) == 1 and "Close" in prices.columns:
+                closes_by_ticker[batch[0]] = prices["Close"].dropna()
+
+    if not closes_by_ticker:
+        result = pd.DataFrame()
+    else:
+        result = pd.DataFrame(closes_by_ticker).sort_index()
+    result.attrs["unavailable_tickers"] = sorted(set(tickers) - set(closes_by_ticker))
+    result.attrs["failed_batches"] = failed_batches
+    return result
+
+
+def build_sector_dashboard():
+    industry_by_symbol = nse_industry_by_symbol()
+    if not industry_by_symbol:
+        raise RuntimeError("NSE NIFTY 500 industry classifications are unavailable.")
+
+    members_by_sector = {sector: [] for sector in SECTOR_INDUSTRY_KEYWORDS}
+    for symbol, industry in industry_by_symbol.items():
+        sector = _sector_for_industry(industry)
+        if sector:
+            members_by_sector[sector].append(symbol + ".NS")
+
+    index_tickers = ("^NSEI", *SECTOR_INDICES.values())
+    index_prices = yahoo_daily_close_history(index_tickers)
+    if index_prices.empty or "^NSEI" not in index_prices:
+        raise RuntimeError("Yahoo Finance did not return NIFTY benchmark history.")
+
+    stock_tickers = tuple(
+        ticker for members in members_by_sector.values() for ticker in members
+    )
+    stock_prices = yahoo_daily_close_history(stock_tickers)
+    benchmark = index_prices["^NSEI"].dropna()
+    if len(benchmark) < 22:
+        raise RuntimeError("Not enough NIFTY history to calculate sector relative strength.")
+    nifty_month_return = (benchmark.iloc[-1] / benchmark.iloc[-22] - 1) * 100
+
+    rows = []
+    unavailable_indices = []
+    for sector_name, ticker in SECTOR_INDICES.items():
+        sector_prices = index_prices[ticker].dropna() if ticker in index_prices else pd.Series(dtype=float)
+        if len(sector_prices) < 50:
+            unavailable_indices.append(sector_name)
+            continue
+
+        close = float(sector_prices.iloc[-1])
+        one_week = (sector_prices.iloc[-1] / sector_prices.iloc[-6] - 1) * 100
+        one_month = (sector_prices.iloc[-1] / sector_prices.iloc[-22] - 1) * 100
+        three_month = (sector_prices.iloc[-1] / sector_prices.iloc[-64] - 1) * 100 if len(sector_prices) >= 64 else None
+        above_20dma = close > sector_prices.tail(20).mean()
+        above_50dma = close > sector_prices.tail(50).mean()
+        index_trend = (
+            "Above 20/50DMA" if above_20dma and above_50dma
+            else "Below 20/50DMA" if not above_20dma and not above_50dma
+            else "Mixed"
+        )
+        members = members_by_sector.get(
+            "Banks" if sector_name == "NIFTY Bank" else
+            "Financial Services" if sector_name == "NIFTY Financial Services" else
+            sector_name.removeprefix("NIFTY "),
+            [],
+        )
+
+        above_20_count = 0
+        above_50_count = 0
+        tracked = 0
+        for member in members:
+            if member not in stock_prices:
+                continue
+            history = stock_prices[member].dropna()
+            if len(history) < 50:
+                continue
+            member_close = float(history.iloc[-1])
+            tracked += 1
+            above_20_count += member_close > history.tail(20).mean()
+            above_50_count += member_close > history.tail(50).mean()
+
+        breadth_20 = above_20_count / tracked * 100 if tracked else None
+        breadth_50 = above_50_count / tracked * 100 if tracked else None
+        relative_strength = one_month - nifty_month_return
+
+        if (
+            above_20dma and above_50dma and relative_strength > 0
+            and breadth_20 is not None and breadth_20 >= 60
+        ):
+            signal = "Bullish"
+        elif (
+            not above_20dma and not above_50dma and relative_strength < 0
+            and breadth_20 is not None and breadth_20 <= 40
+        ):
+            signal = "Bearish"
+        else:
+            signal = "Mixed / Neutral"
+
+        rows.append({
+            "Sector": sector_name,
+            "Signal": signal,
+            "Index Trend": index_trend,
+            "Index": close,
+            "1W Return": one_week,
+            "1M Return": one_month,
+            "3M Return": three_month,
+            "1M vs NIFTY": relative_strength,
+            "Above 20DMA": breadth_20,
+            "Above 50DMA": breadth_50,
+            "Breadth Coverage": f"{tracked}/{len(members)}",
+        })
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        raise RuntimeError("No sector index histories were returned by Yahoo Finance.")
+    missing_constituents = stock_prices.attrs.get("unavailable_tickers", [])
+    result["Signal Rank"] = result["Signal"].map(
+        {"Bullish": 0, "Mixed / Neutral": 1, "Bearish": 2}
+    )
+    result = result.sort_values(
+        ["Signal Rank", "1M vs NIFTY"], ascending=[True, False]
+    ).drop(columns="Signal Rank").reset_index(drop=True)
+    result.attrs["unavailable_indices"] = unavailable_indices
+    result.attrs["nifty_month_return"] = nifty_month_return
+    result.attrs["missing_constituents"] = len(missing_constituents)
+    result.attrs["constituent_count"] = len(stock_tickers)
+    result.attrs["breadth_available"] = not stock_prices.empty
+    result.attrs["failed_batches"] = (
+        index_prices.attrs.get("failed_batches", [])
+        + stock_prices.attrs.get("failed_batches", [])
     )
     return result
 
@@ -1398,6 +1609,93 @@ if "results" in st.session_state:
         st.warning("No stock data returned.")
 else:
     st.info("Tap **SCAN UDTS ONLY** to get the current 3/3 list.")
+
+st.divider()
+st.subheader("🧭 NSE SECTOR TREND & BREADTH — INDEPENDENT MODULE")
+st.caption(
+    "Compares NSE sector indices with NIFTY and measures NIFTY 500 constituent breadth. "
+    "This analysis is independent of the UDTS monthly/weekly/daily rules."
+)
+if st.button("🔄 REFRESH SECTOR TREND", use_container_width=True):
+    try:
+        with st.spinner("Loading NSE industry classifications and sector/stock history..."):
+            st.session_state.sector_dashboard_results = build_sector_dashboard()
+        st.session_state.sector_dashboard_scan_time = datetime.now(IST).strftime(
+            "%d-%b-%Y %H:%M:%S IST"
+        )
+    except Exception as e:
+        st.error(f"Sector dashboard refresh failed: {e}")
+
+if st.session_state.get("sector_dashboard_results") is not None:
+    sector_df = st.session_state.sector_dashboard_results.copy()
+    st.caption(
+        "Last sector refresh: "
+        + st.session_state.get("sector_dashboard_scan_time", "—")
+    )
+    unavailable_indices = sector_df.attrs.get("unavailable_indices", [])
+    if unavailable_indices:
+        st.warning(
+            "Yahoo Finance did not return enough history for: "
+            + ", ".join(unavailable_indices)
+        )
+    constituent_count = sector_df.attrs.get("constituent_count", 0)
+    missing_constituents = sector_df.attrs.get("missing_constituents", 0)
+    if not sector_df.attrs.get("breadth_available", False):
+        st.warning(
+            "Constituent breadth is unavailable; sectors will remain Mixed / Neutral "
+            "because breadth is required for a directional label."
+        )
+    elif missing_constituents:
+        st.warning(
+            f"Yahoo Finance returned no usable history for {missing_constituents} of "
+            f"{constituent_count} classified constituents. Breadth coverage is shown "
+            "per sector."
+        )
+    failed_batches = sector_df.attrs.get("failed_batches", [])
+    if failed_batches:
+        st.warning(
+            "Some Yahoo Finance history batches failed: " + "; ".join(failed_batches)
+        )
+    if sector_df.empty:
+        st.info("No sector data is available right now.")
+    else:
+        st.dataframe(
+            sector_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Index": st.column_config.NumberColumn("Index Level", format="%.2f"),
+                "1W Return": st.column_config.NumberColumn("1W Return", format="%.2f%%"),
+                "1M Return": st.column_config.NumberColumn("1M Return", format="%.2f%%"),
+                "3M Return": st.column_config.NumberColumn("3M Return", format="%.2f%%"),
+                "1M vs NIFTY": st.column_config.NumberColumn(
+                    "1M Relative Strength vs NIFTY (pp)", format="%.2f"
+                ),
+                "Above 20DMA": st.column_config.NumberColumn(
+                    "Stocks Above 20DMA", format="%.1f%%"
+                ),
+                "Above 50DMA": st.column_config.NumberColumn(
+                    "Stocks Above 50DMA", format="%.1f%%"
+                ),
+            },
+        )
+        st.caption(
+            "Bullish requires the sector index above its 20/50-day averages, "
+            "outperformance versus NIFTY over one month, and at least 60% of "
+            "tracked constituents above their 20-day average. Bearish uses the "
+            "opposite trend/relative-strength conditions and 40% or lower breadth; "
+            "all other combinations are Mixed / Neutral. Breadth coverage shows "
+            "tracked constituents versus NSE-classified NIFTY 500 constituents."
+        )
+        st.download_button(
+            "⬇️ Download Sector Trend & Breadth",
+            sector_df.to_csv(index=False).encode(),
+            "nse_sector_trend_breadth.csv",
+            "text/csv",
+            use_container_width=True,
+        )
+else:
+    st.info("Tap **REFRESH SECTOR TREND** to view the independent sector dashboard.")
 
 st.divider()
 st.subheader("📊 INDEX F&O TRADING — INDEPENDENT MODULE")
