@@ -1432,17 +1432,15 @@ def get_index_fno_setup(symbol, option_moneyness="1-step ITM"):
         if bars.empty:
             return None
 
-        today = now.date()
         dates = sorted(set(bars.index.date))
-        prev_dates = [d for d in dates if d < today]
+        today = now.date()
+        target_date = today if today in dates else dates[-1]
+        prev_dates = [d for d in dates if d < target_date]
         if not prev_dates:
             return None
         prev_date = prev_dates[-1]
         prev = bars[bars.index.date == prev_date]
-        session = bars[bars.index.date == today]
-        target_date = today if not session.empty else dates[-1]
-        if session.empty:
-            session = bars[bars.index.date == target_date]
+        session = bars[bars.index.date == target_date]
         if session.empty:
             return None
 
@@ -1459,6 +1457,9 @@ def get_index_fno_setup(symbol, option_moneyness="1-step ITM"):
         q = bars.resample("15min", origin="start_day").agg(
             Open=("Open","first"), High=("High","max"), Low=("Low","min"),
             Close=("Close","last"), Volume=("Volume","sum")).dropna()
+        q = q[q.index + pd.Timedelta(minutes=15) <= now]
+        if len(q) < 35:
+            return None
         close15 = q.Close.astype(float)
         ema21 = float(close15.ewm(span=21, adjust=False).mean().iloc[-1])
         ema34 = float(close15.ewm(span=34, adjust=False).mean().iloc[-1])
@@ -1530,7 +1531,12 @@ def pick_index_option(symbol, direction, moneyness="1-step ITM"):
         if not expiries: return None
         expiry = min(expiries)
         expiry_text = expiry.strftime("%d-%b-%Y")
-        strikes = sorted({_n(x.get("strikePrice")) for x in rows if _n(x.get("strikePrice")) is not None})
+        expiry_rows = [x for x in rows if x.get("expiryDate") == expiry_text]
+        strikes = sorted({
+            _n(x.get("strikePrice"))
+            for x in expiry_rows
+            if _n(x.get("strikePrice")) is not None
+        })
         if not strikes: return None
         atm = min(strikes, key=lambda s: abs(s-spot))
         idx = strikes.index(atm)
@@ -1542,8 +1548,8 @@ def pick_index_option(symbol, direction, moneyness="1-step ITM"):
             strike = strikes[min(len(strikes)-1, idx+1)]
         typ = "CE" if direction == "LONG" else "PE"
         chosen = None
-        for x in rows:
-            if x.get("expiryDate") == expiry_text and _n(x.get("strikePrice")) == strike:
+        for x in expiry_rows:
+            if _n(x.get("strikePrice")) == strike:
                 chosen = x.get(typ); break
         if not chosen: return None
         premium = _n(chosen.get("lastPrice"))
