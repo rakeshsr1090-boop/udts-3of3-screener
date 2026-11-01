@@ -40,6 +40,29 @@ st.markdown(
     [data-testid="stHeader"] {
         background: rgba(245, 247, 251, .82);
     }
+    [data-testid="stSidebar"] {
+        border-right: 1px solid var(--line);
+        background: rgba(255,255,255,.92);
+    }
+    [data-testid="stSidebar"] [data-testid="stRadio"] > label {
+        color: var(--muted);
+        font-size: .78rem;
+        font-weight: 750;
+        letter-spacing: .1em;
+        text-transform: uppercase;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label {
+        padding: .65rem .75rem;
+        border: 1px solid transparent;
+        border-radius: 11px;
+        color: var(--ink);
+        font-weight: 650;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+        border-color: #c9d8fb;
+        background: #edf3ff;
+        color: var(--brand);
+    }
     .app-hero {
         position: relative;
         overflow: hidden;
@@ -1545,6 +1568,11 @@ if os.environ.get("UDTS_DAILY_SCAN") == "1":
     run_scheduled_daily_scan()
     raise SystemExit(0)
 
+active_module = st.sidebar.radio(
+    "Dashboard",
+    ["UDTS Screener", "NSE Sector Trend & Breadth", "Index F&O Trading"],
+    key="active_dashboard_module",
+)
 
 st.markdown(
     """
@@ -1557,359 +1585,362 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.caption("STEP 1 · Strict UDTS filter using the previous completed Month + Week + Day")
+if active_module == "UDTS Screener":
+    st.caption("STEP 1 · Strict UDTS filter using the previous completed Month + Week + Day")
 
-with st.expander("⚙️ Settings"):
-    workers = st.slider("Parallel downloads", 2, 12, 8)
-    broader_scan = st.checkbox("Broader market scan (include more Godrej-style setups)", value=False)
-    min_strength = st.slider("Minimum strength filter", 6.5, 10.0, 7.0 if broader_scan else 8.0, 0.5)
+    with st.expander("⚙️ Settings"):
+        workers = st.slider("Parallel downloads", 2, 12, 8)
+        broader_scan = st.checkbox("Broader market scan (include more Godrej-style setups)", value=False)
+        min_strength = st.slider("Minimum strength filter", 6.5, 10.0, 7.0 if broader_scan else 8.0, 0.5)
 
-st.markdown(
-    """
-    <div class="signal-guide">
-        <span>🟢 LONG · Month + Week + Day aligned</span>
-        <span>🔴 SHORT · Month + Week + Day aligned</span>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+    st.markdown(
+        """
+        <div class="signal-guide">
+            <span>🟢 LONG · Month + Week + Day aligned</span>
+            <span>🔴 SHORT · Month + Week + Day aligned</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-if st.button("🔄 SCAN UDTS ONLY", type="primary", use_container_width=True):
-    try:
-        syms = symbols()
-        if broader_scan:
-            syms = broaden_symbol_universe(syms)
-        with st.spinner("Getting latest NSE EOD bhavcopy..."):
-            nse_eod, eod_dt = latest_nse_eod()
-        if nse_eod is None:
-            st.error("Could not obtain the latest NSE EOD bhavcopy. Scan stopped so stale daily data is not used.")
-        else:
-            with st.spinner(f"Scanning {len(syms)} stocks for UDTS 3/3..."):
-                results = scan(syms, nse_eod, workers)
-            scan_time = datetime.now(IST)
-            save_daily_results(
-                eod_dt.strftime("%Y-%m-%d"),
-                scan_time.isoformat(),
-                broader_scan,
-                min_strength,
-                results,
-            )
-            st.session_state.results = results
-            st.session_state.scan_time = scan_time.strftime("%d-%b-%Y %H:%M:%S IST")
-            st.session_state.eod_date = eod_dt.strftime("%d-%b-%Y")
-            st.session_state.confirm_results = None
-            st.session_state.confirm_scan_time = None
-            st.session_state.fno_results = None
-            st.session_state.fno_scan_time = None
-            st.session_state.broader_scan = broader_scan
-            st.session_state.min_strength = min_strength
-    except Exception as e:
-        st.error(f"UDTS scan failed: {e}")
-
-with st.expander("📅 Saved daily UDTS results"):
-    industry_by_symbol = None
-    industry_warning_shown = False
-    try:
-        saved_days = list_saved_daily_results()
-        if saved_days.empty:
-            st.info("No daily results have been saved yet. Run a UDTS scan to create the first snapshot.")
-        else:
-            selected_date = st.selectbox(
-                "Choose an NSE EOD date",
-                saved_days["eod_date"].tolist(),
-                format_func=lambda value: pd.Timestamp(value).strftime("%d-%b-%Y"),
-                key="saved_udts_date",
-            )
-            saved_result = load_daily_results(selected_date)
-            if saved_result is None:
-                st.error("The selected saved result could not be found.")
+    if st.button("🔄 SCAN UDTS ONLY", type="primary", use_container_width=True):
+        try:
+            syms = symbols()
+            if broader_scan:
+                syms = broaden_symbol_universe(syms)
+            with st.spinner("Getting latest NSE EOD bhavcopy..."):
+                nse_eod, eod_dt = latest_nse_eod()
+            if nse_eod is None:
+                st.error("Could not obtain the latest NSE EOD bhavcopy. Scan stopped so stale daily data is not used.")
             else:
-                st.caption(
-                    f"Scanned: {pd.Timestamp(saved_result['scanned_at']).strftime('%d-%b-%Y %H:%M:%S %Z')} | "
-                    f"Broader scan: {'ON' if saved_result['broader_scan'] else 'OFF'} | "
-                    f"Minimum strength: {saved_result['min_strength']:.1f}"
+                with st.spinner(f"Scanning {len(syms)} stocks for UDTS 3/3..."):
+                    results = scan(syms, nse_eod, workers)
+                scan_time = datetime.now(IST)
+                save_daily_results(
+                    eod_dt.strftime("%Y-%m-%d"),
+                    scan_time.isoformat(),
+                    broader_scan,
+                    min_strength,
+                    results,
                 )
-                saved_df = pd.DataFrame(saved_result["results"])
-                if saved_df.empty:
-                    st.info("The saved scan had no matching stocks.")
-                else:
-                    industry_by_symbol = nse_industry_by_symbol()
-                    if not industry_by_symbol:
-                        st.warning("NSE industry classifications could not be loaded; stocks will show as Not classified.")
-                        industry_warning_shown = True
-                    saved_df = add_nse_industry(saved_df, industry_by_symbol)
-                    history_cols = ["Stock", "NSE Industry", "Month", "Week", "Day", "Direction", "Price", "EOD Date"]
-                    history_df = saved_df[history_cols].sort_values(["Direction", "Stock"])
-                    st.dataframe(
-                        history_df,
-                        hide_index=True,
-                        use_container_width=True,
-                        column_config={
-                            "Price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f")
-                        },
-                    )
-                    st.download_button(
-                        "⬇️ Download saved daily results",
-                        history_df.to_csv(index=False).encode(),
-                        f"udts_results_{selected_date}.csv",
-                        "text/csv",
-                        use_container_width=True,
-                        key="download_saved_udts_results",
-                    )
-    except (json.JSONDecodeError, KeyError, OSError, ValueError) as e:
-        st.error(f"Could not load saved daily results: {e}")
-
-if "results" in st.session_state:
-    df = pd.DataFrame(st.session_state.results)
-    if not df.empty:
-        if industry_by_symbol is None:
-            industry_by_symbol = nse_industry_by_symbol()
-        if not industry_by_symbol and not industry_warning_shown:
-            st.warning("NSE industry classifications could not be loaded; stocks will show as Not classified.")
-            industry_warning_shown = True
-        df = add_nse_industry(df, industry_by_symbol)
-        passed_udts = df[df.Direction.isin(["LONG", "SHORT"])].copy()
-        mixed = df[~df.Direction.isin(["LONG", "SHORT"])].copy()
-        st.session_state.udts_passed = passed_udts.copy()
-
-        longs_udts = passed_udts[passed_udts.Direction == "LONG"].sort_values("Stock")
-        shorts_udts = passed_udts[passed_udts.Direction == "SHORT"].sort_values("Stock")
-        a, b, c = st.columns(3)
-        a.metric("Scanned", len(df)); b.metric("🟢 UDTS LONG 3/3", len(longs_udts)); c.metric("🔴 UDTS SHORT 3/3", len(shorts_udts))
-        st.caption("Last UDTS scan: " + st.session_state.scan_time)
-        st.caption(f"NSE EOD candle used: {st.session_state.eod_date}")
-        st.caption("Broader scan mode: ON" if st.session_state.get("broader_scan", False) else "Broader scan mode: OFF")
-
-        udts_cols = ["Stock", "NSE Industry", "Month", "Week", "Day", "Direction", "Price"]
-        st.subheader("🟢 UDTS LONG — 3/3")
-        st.dataframe(longs_udts[udts_cols], hide_index=True, use_container_width=True,
-                     column_config={"Price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f")})
-        st.subheader("🔴 UDTS SHORT — 3/3")
-        st.dataframe(shorts_udts[udts_cols], hide_index=True, use_container_width=True,
-                     column_config={"Price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f")})
-        with st.expander("⚪ Mixed / rejected by UDTS"):
-            aligned_month_week = mixed["Month"].eq(mixed["Week"]) & mixed["Month"].isin(["🟢", "🔴"])
-            daily_only_rejected = mixed.loc[
-                aligned_month_week & mixed["Day"].ne(mixed["Month"]),
-                ["Stock", "NSE Industry", "Month", "Week", "Day", "EOD Date"],
-            ].copy()
-            daily_only_rejected["UDTS Side"] = daily_only_rejected["Month"].map(
-                {"🟢": "LONG", "🔴": "SHORT"}
-            )
-            st.markdown("**Monthly + Weekly passed, Daily failed**")
-            st.caption("Month and Week agree for LONG or SHORT, but the daily candle does not confirm that side.")
-            st.dataframe(
-                daily_only_rejected[["Stock", "NSE Industry", "UDTS Side", "Month", "Week", "Day", "EOD Date"]],
-                hide_index=True,
-                use_container_width=True,
-            )
-            st.markdown("**All mixed / rejected results**")
-            st.dataframe(mixed[["Stock", "NSE Industry", "Month", "Week", "Day", "Direction", "EOD Date"]], hide_index=True, use_container_width=True)
-        st.download_button("⬇️ Download UDTS 3/3 List", passed_udts[udts_cols].to_csv(index=False).encode(), "udts_3of3_list.csv", "text/csv", use_container_width=True)
-
-        st.divider()
-        st.subheader("🎯 STEP 2 — LIVE CPR → VWAP → EMA 21/34 → RSI")
-        st.caption("Uses ONLY UDTS-passed stocks above. The broader-scan slider relaxes the score threshold so you capture more Godrej-style names without breaking the core rules.")
-
-        if st.button("🔄 REFRESH LIVE CONFIRMATION", use_container_width=True):
-            try:
-                with st.spinner(f"Refreshing Step 2 for {len(passed_udts)} UDTS-passed stocks..."):
-                    confirm_df = add_live_confirmation_filter(
-                        passed_udts.copy(),
-                        min_strength=st.session_state.get("min_strength", 7.0 if st.session_state.get("broader_scan", False) else 8.0),
-                        broader_mode=st.session_state.get("broader_scan", False),
-                    )
-                st.session_state.confirm_results = confirm_df
-                st.session_state.confirm_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+                st.session_state.results = results
+                st.session_state.scan_time = scan_time.strftime("%d-%b-%Y %H:%M:%S IST")
+                st.session_state.eod_date = eod_dt.strftime("%d-%b-%Y")
+                st.session_state.confirm_results = None
+                st.session_state.confirm_scan_time = None
                 st.session_state.fno_results = None
                 st.session_state.fno_scan_time = None
-            except Exception as e:
-                st.error(f"Live confirmation refresh failed: {e}")
+                st.session_state.broader_scan = broader_scan
+                st.session_state.min_strength = min_strength
+        except Exception as e:
+            st.error(f"UDTS scan failed: {e}")
 
-        if st.session_state.get("confirm_results") is not None:
-            confirm_df = st.session_state.confirm_results.copy()
-            longs_confirm = confirm_df[confirm_df.Direction == "LONG"].sort_values(["Trade Candidate", "Strength Score", "Confirm Score", "Stock"], ascending=[False, False, False, True])
-            shorts_confirm = confirm_df[confirm_df.Direction == "SHORT"].sort_values(["Trade Candidate", "Strength Score", "Confirm Score", "Stock"], ascending=[False, False, False, True])
-            x, y, z, q = st.columns(4)
-            x.metric("UDTS stocks checked", len(confirm_df)); y.metric("🏆 above threshold", int((confirm_df["Strength Score"] >= st.session_state.get("min_strength", 8.0)).sum())); z.metric("🟢 LONG 4/4", int((confirm_df["Confirmation"] == "LONG 4/4").sum())); q.metric("🔴 SHORT 4/4", int((confirm_df["Confirmation"] == "SHORT 4/4").sum()))
-            st.caption("Last live confirmation refresh: " + st.session_state.confirm_scan_time)
-            st.caption("Indicator timeframe: 15-minute LIVE | Current completed 15m bars included; current in-progress bar excluded")
+    with st.expander("📅 Saved daily UDTS results"):
+        industry_by_symbol = None
+        industry_warning_shown = False
+        try:
+            saved_days = list_saved_daily_results()
+            if saved_days.empty:
+                st.info("No daily results have been saved yet. Run a UDTS scan to create the first snapshot.")
+            else:
+                selected_date = st.selectbox(
+                    "Choose an NSE EOD date",
+                    saved_days["eod_date"].tolist(),
+                    format_func=lambda value: pd.Timestamp(value).strftime("%d-%b-%Y"),
+                    key="saved_udts_date",
+                )
+                saved_result = load_daily_results(selected_date)
+                if saved_result is None:
+                    st.error("The selected saved result could not be found.")
+                else:
+                    st.caption(
+                        f"Scanned: {pd.Timestamp(saved_result['scanned_at']).strftime('%d-%b-%Y %H:%M:%S %Z')} | "
+                        f"Broader scan: {'ON' if saved_result['broader_scan'] else 'OFF'} | "
+                        f"Minimum strength: {saved_result['min_strength']:.1f}"
+                    )
+                    saved_df = pd.DataFrame(saved_result["results"])
+                    if saved_df.empty:
+                        st.info("The saved scan had no matching stocks.")
+                    else:
+                        industry_by_symbol = nse_industry_by_symbol()
+                        if not industry_by_symbol:
+                            st.warning("NSE industry classifications could not be loaded; stocks will show as Not classified.")
+                            industry_warning_shown = True
+                        saved_df = add_nse_industry(saved_df, industry_by_symbol)
+                        history_cols = ["Stock", "NSE Industry", "Month", "Week", "Day", "Direction", "Price", "EOD Date"]
+                        history_df = saved_df[history_cols].sort_values(["Direction", "Stock"])
+                        st.dataframe(
+                            history_df,
+                            hide_index=True,
+                            use_container_width=True,
+                            column_config={
+                                "Price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f")
+                            },
+                        )
+                        st.download_button(
+                            "⬇️ Download saved daily results",
+                            history_df.to_csv(index=False).encode(),
+                            f"udts_results_{selected_date}.csv",
+                            "text/csv",
+                            use_container_width=True,
+                            key="download_saved_udts_results",
+                        )
+        except (json.JSONDecodeError, KeyError, OSError, ValueError) as e:
+            st.error(f"Could not load saved daily results: {e}")
 
-            confirm_cols = ["Stock", "NSE Industry", "Direction", "Price", "CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Confirm Score", "Strength Score", "Grade", "Mandatory Gate", "Trade Candidate", "Confirmation"]
-            st.markdown("**🟢 LONG confirmation candidates**")
-            st.dataframe(longs_confirm[confirm_cols], hide_index=True, use_container_width=True,
-                         column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%.0f")})
-            st.markdown("**🔴 SHORT confirmation candidates**")
-            st.dataframe(shorts_confirm[confirm_cols], hide_index=True, use_container_width=True,
-                         column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%.0f")})
-            st.caption("10/10 ranking: CPR 2 + VWAP 2 + EMA 21/34 2 + RSI 1 + RVOL 1.5 + ADX 1 + Liquidity 0.5. CPR + VWAP are mandatory gates and score ≥8/10 is the trade-candidate threshold. Broader mode shifts the threshold lower to capture more similar setups.")
-            st.download_button("⬇️ Download UDTS-passed + LIVE Confirmation List", confirm_df[confirm_cols].to_csv(index=False).encode(), "udts_3of3_live_confirmation.csv", "text/csv", use_container_width=True)
+    if "results" in st.session_state:
+        df = pd.DataFrame(st.session_state.results)
+        if not df.empty:
+            if industry_by_symbol is None:
+                industry_by_symbol = nse_industry_by_symbol()
+            if not industry_by_symbol and not industry_warning_shown:
+                st.warning("NSE industry classifications could not be loaded; stocks will show as Not classified.")
+                industry_warning_shown = True
+            df = add_nse_industry(df, industry_by_symbol)
+            passed_udts = df[df.Direction.isin(["LONG", "SHORT"])].copy()
+            mixed = df[~df.Direction.isin(["LONG", "SHORT"])].copy()
+            st.session_state.udts_passed = passed_udts.copy()
+
+            longs_udts = passed_udts[passed_udts.Direction == "LONG"].sort_values("Stock")
+            shorts_udts = passed_udts[passed_udts.Direction == "SHORT"].sort_values("Stock")
+            a, b, c = st.columns(3)
+            a.metric("Scanned", len(df)); b.metric("🟢 UDTS LONG 3/3", len(longs_udts)); c.metric("🔴 UDTS SHORT 3/3", len(shorts_udts))
+            st.caption("Last UDTS scan: " + st.session_state.scan_time)
+            st.caption(f"NSE EOD candle used: {st.session_state.eod_date}")
+            st.caption("Broader scan mode: ON" if st.session_state.get("broader_scan", False) else "Broader scan mode: OFF")
+
+            udts_cols = ["Stock", "NSE Industry", "Month", "Week", "Day", "Direction", "Price"]
+            st.subheader("🟢 UDTS LONG — 3/3")
+            st.dataframe(longs_udts[udts_cols], hide_index=True, use_container_width=True,
+                         column_config={"Price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f")})
+            st.subheader("🔴 UDTS SHORT — 3/3")
+            st.dataframe(shorts_udts[udts_cols], hide_index=True, use_container_width=True,
+                         column_config={"Price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f")})
+            with st.expander("⚪ Mixed / rejected by UDTS"):
+                aligned_month_week = mixed["Month"].eq(mixed["Week"]) & mixed["Month"].isin(["🟢", "🔴"])
+                daily_only_rejected = mixed.loc[
+                    aligned_month_week & mixed["Day"].ne(mixed["Month"]),
+                    ["Stock", "NSE Industry", "Month", "Week", "Day", "EOD Date"],
+                ].copy()
+                daily_only_rejected["UDTS Side"] = daily_only_rejected["Month"].map(
+                    {"🟢": "LONG", "🔴": "SHORT"}
+                )
+                st.markdown("**Monthly + Weekly passed, Daily failed**")
+                st.caption("Month and Week agree for LONG or SHORT, but the daily candle does not confirm that side.")
+                st.dataframe(
+                    daily_only_rejected[["Stock", "NSE Industry", "UDTS Side", "Month", "Week", "Day", "EOD Date"]],
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                st.markdown("**All mixed / rejected results**")
+                st.dataframe(mixed[["Stock", "NSE Industry", "Month", "Week", "Day", "Direction", "EOD Date"]], hide_index=True, use_container_width=True)
+            st.download_button("⬇️ Download UDTS 3/3 List", passed_udts[udts_cols].to_csv(index=False).encode(), "udts_3of3_list.csv", "text/csv", use_container_width=True)
 
             st.divider()
-            st.subheader("🏦 STEP 3 — TOP 15 F&O CONTRACTS")
-            st.caption("Fetches only up to 15 stocks meeting: Grade A+, Strength Score ≥ threshold, and matching LONG/SHORT 4/4 confirmation. Broader mode uses a lower threshold and a wider universe so you don’t miss Godrej-like setups.")
-            if st.button("🔄 FETCH TOP 15 F&O DETAILS", use_container_width=True):
+            st.subheader("🎯 STEP 2 — LIVE CPR → VWAP → EMA 21/34 → RSI")
+            st.caption("Uses ONLY UDTS-passed stocks above. The broader-scan slider relaxes the score threshold so you capture more Godrej-style names without breaking the core rules.")
+
+            if st.button("🔄 REFRESH LIVE CONFIRMATION", use_container_width=True):
                 try:
-                    with st.spinner("Getting NSE lot sizes and ATM option prices for the top 15 candidates..."):
-                        st.session_state.fno_results = build_fno_candidates(confirm_df.copy(), min_strength=st.session_state.get("min_strength", 8.0))
-                    st.session_state.fno_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+                    with st.spinner(f"Refreshing Step 2 for {len(passed_udts)} UDTS-passed stocks..."):
+                        confirm_df = add_live_confirmation_filter(
+                            passed_udts.copy(),
+                            min_strength=st.session_state.get("min_strength", 7.0 if st.session_state.get("broader_scan", False) else 8.0),
+                            broader_mode=st.session_state.get("broader_scan", False),
+                        )
+                    st.session_state.confirm_results = confirm_df
+                    st.session_state.confirm_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+                    st.session_state.fno_results = None
+                    st.session_state.fno_scan_time = None
                 except Exception as e:
-                    st.error(f"F&O details refresh failed: {e}")
+                    st.error(f"Live confirmation refresh failed: {e}")
 
-            if st.session_state.get("fno_results") is not None:
-                fno_df = st.session_state.fno_results.copy()
-                st.caption("Last F&O refresh: " + st.session_state.fno_scan_time)
-                if fno_df.empty:
-                    st.warning("NSE did not return usable ATM option quotes for the eligible candidates. Try again shortly.")
-                else:
-                    fno_df = add_nse_industry(fno_df, industry_by_symbol or {})
-                    fno_cols = ["Stock", "NSE Industry", "Direction", "Strength Score", "Grade", "ADX", "RVOL", "Expiry", "Underlying", "ATM Strike", "Lot Size", "CE-ATM Price - Long", "PE-ATM Price - Short"]
-                    st.dataframe(fno_df[fno_cols], hide_index=True, use_container_width=True,
-                        column_config={
-                            "Strength Score": st.column_config.NumberColumn("Strength", format="%.1f/10"),
-                            "ADX": st.column_config.NumberColumn("ADX", format="%.2f"),
-                            "RVOL": st.column_config.NumberColumn("RVOL", format="%.2f"),
-                            "Underlying": st.column_config.NumberColumn("Underlying (₹)", format="₹%.2f"),
-                            "ATM Strike": st.column_config.NumberColumn("ATM Strike (₹)", format="₹%.2f"),
-                            "Lot Size": st.column_config.NumberColumn("Lot Size", format="%d"),
-                            "CE-ATM Price - Long": st.column_config.NumberColumn("CE-ATM Price - Long (₹)", format="₹%.2f"),
-                            "PE-ATM Price - Short": st.column_config.NumberColumn("PE-ATM Price - Short (₹)", format="₹%.2f"),
-                        })
-                    st.download_button("⬇️ Download Top 15 F&O Details", fno_df.to_csv(index=False).encode(), "udts_top15_fno_details.csv", "text/csv", use_container_width=True)
+            if st.session_state.get("confirm_results") is not None:
+                confirm_df = st.session_state.confirm_results.copy()
+                longs_confirm = confirm_df[confirm_df.Direction == "LONG"].sort_values(["Trade Candidate", "Strength Score", "Confirm Score", "Stock"], ascending=[False, False, False, True])
+                shorts_confirm = confirm_df[confirm_df.Direction == "SHORT"].sort_values(["Trade Candidate", "Strength Score", "Confirm Score", "Stock"], ascending=[False, False, False, True])
+                x, y, z, q = st.columns(4)
+                x.metric("UDTS stocks checked", len(confirm_df)); y.metric("🏆 above threshold", int((confirm_df["Strength Score"] >= st.session_state.get("min_strength", 8.0)).sum())); z.metric("🟢 LONG 4/4", int((confirm_df["Confirmation"] == "LONG 4/4").sum())); q.metric("🔴 SHORT 4/4", int((confirm_df["Confirmation"] == "SHORT 4/4").sum()))
+                st.caption("Last live confirmation refresh: " + st.session_state.confirm_scan_time)
+                st.caption("Indicator timeframe: 15-minute LIVE | Current completed 15m bars included; current in-progress bar excluded")
 
+                confirm_cols = ["Stock", "NSE Industry", "Direction", "Price", "CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Confirm Score", "Strength Score", "Grade", "Mandatory Gate", "Trade Candidate", "Confirmation"]
+                st.markdown("**🟢 LONG confirmation candidates**")
+                st.dataframe(longs_confirm[confirm_cols], hide_index=True, use_container_width=True,
+                             column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%.0f")})
+                st.markdown("**🔴 SHORT confirmation candidates**")
+                st.dataframe(shorts_confirm[confirm_cols], hide_index=True, use_container_width=True,
+                             column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%.0f")})
+                st.caption("10/10 ranking: CPR 2 + VWAP 2 + EMA 21/34 2 + RSI 1 + RVOL 1.5 + ADX 1 + Liquidity 0.5. CPR + VWAP are mandatory gates and score ≥8/10 is the trade-candidate threshold. Broader mode shifts the threshold lower to capture more similar setups.")
+                st.download_button("⬇️ Download UDTS-passed + LIVE Confirmation List", confirm_df[confirm_cols].to_csv(index=False).encode(), "udts_3of3_live_confirmation.csv", "text/csv", use_container_width=True)
+
+                st.divider()
+                st.subheader("🏦 STEP 3 — TOP 15 F&O CONTRACTS")
+                st.caption("Fetches only up to 15 stocks meeting: Grade A+, Strength Score ≥ threshold, and matching LONG/SHORT 4/4 confirmation. Broader mode uses a lower threshold and a wider universe so you don’t miss Godrej-like setups.")
+                if st.button("🔄 FETCH TOP 15 F&O DETAILS", use_container_width=True):
+                    try:
+                        with st.spinner("Getting NSE lot sizes and ATM option prices for the top 15 candidates..."):
+                            st.session_state.fno_results = build_fno_candidates(confirm_df.copy(), min_strength=st.session_state.get("min_strength", 8.0))
+                        st.session_state.fno_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+                    except Exception as e:
+                        st.error(f"F&O details refresh failed: {e}")
+
+                if st.session_state.get("fno_results") is not None:
+                    fno_df = st.session_state.fno_results.copy()
+                    st.caption("Last F&O refresh: " + st.session_state.fno_scan_time)
+                    if fno_df.empty:
+                        st.warning("NSE did not return usable ATM option quotes for the eligible candidates. Try again shortly.")
+                    else:
+                        fno_df = add_nse_industry(fno_df, industry_by_symbol or {})
+                        fno_cols = ["Stock", "NSE Industry", "Direction", "Strength Score", "Grade", "ADX", "RVOL", "Expiry", "Underlying", "ATM Strike", "Lot Size", "CE-ATM Price - Long", "PE-ATM Price - Short"]
+                        st.dataframe(fno_df[fno_cols], hide_index=True, use_container_width=True,
+                            column_config={
+                                "Strength Score": st.column_config.NumberColumn("Strength", format="%.1f/10"),
+                                "ADX": st.column_config.NumberColumn("ADX", format="%.2f"),
+                                "RVOL": st.column_config.NumberColumn("RVOL", format="%.2f"),
+                                "Underlying": st.column_config.NumberColumn("Underlying (₹)", format="₹%.2f"),
+                                "ATM Strike": st.column_config.NumberColumn("ATM Strike (₹)", format="₹%.2f"),
+                                "Lot Size": st.column_config.NumberColumn("Lot Size", format="%d"),
+                                "CE-ATM Price - Long": st.column_config.NumberColumn("CE-ATM Price - Long (₹)", format="₹%.2f"),
+                                "PE-ATM Price - Short": st.column_config.NumberColumn("PE-ATM Price - Short (₹)", format="₹%.2f"),
+                            })
+                        st.download_button("⬇️ Download Top 15 F&O Details", fno_df.to_csv(index=False).encode(), "udts_top15_fno_details.csv", "text/csv", use_container_width=True)
+
+            else:
+                st.info("UDTS is ready. Tap **REFRESH LIVE CONFIRMATION** during market hours for the current Step-2 setup.")
         else:
-            st.info("UDTS is ready. Tap **REFRESH LIVE CONFIRMATION** during market hours for the current Step-2 setup.")
+            st.warning("No stock data returned.")
     else:
-        st.warning("No stock data returned.")
-else:
-    st.info("Tap **SCAN UDTS ONLY** to get the current 3/3 list.")
+        st.info("Tap **SCAN UDTS ONLY** to get the current 3/3 list.")
 
-st.divider()
-st.subheader("🧭 NSE SECTOR TREND & BREADTH — INDEPENDENT MODULE")
-st.caption(
-    "Compares NSE sector indices with NIFTY and measures NIFTY 500 constituent breadth. "
-    "This analysis is independent of the UDTS monthly/weekly/daily rules."
-)
-if st.button("🔄 REFRESH SECTOR TREND", use_container_width=True):
-    try:
-        with st.spinner("Loading NSE industry classifications and sector/stock history..."):
-            st.session_state.sector_dashboard_results = build_sector_dashboard()
-        st.session_state.sector_dashboard_scan_time = datetime.now(IST).strftime(
-            "%d-%b-%Y %H:%M:%S IST"
-        )
-    except Exception as e:
-        st.error(f"Sector dashboard refresh failed: {e}")
-
-if st.session_state.get("sector_dashboard_results") is not None:
-    sector_df = st.session_state.sector_dashboard_results.copy()
+if active_module == "NSE Sector Trend & Breadth":
+    st.divider()
+    st.subheader("🧭 NSE SECTOR TREND & BREADTH — INDEPENDENT MODULE")
     st.caption(
-        "Last sector refresh: "
-        + st.session_state.get("sector_dashboard_scan_time", "—")
+        "Compares NSE sector indices with NIFTY and measures NIFTY 500 constituent breadth. "
+        "This analysis is independent of the UDTS monthly/weekly/daily rules."
     )
-    unavailable_indices = sector_df.attrs.get("unavailable_indices", [])
-    if unavailable_indices:
-        st.warning(
-            "Yahoo Finance did not return enough history for: "
-            + ", ".join(unavailable_indices)
-        )
-    constituent_count = sector_df.attrs.get("constituent_count", 0)
-    missing_constituents = sector_df.attrs.get("missing_constituents", 0)
-    if not sector_df.attrs.get("breadth_available", False):
-        st.warning(
-            "Constituent breadth is unavailable; sectors will remain Mixed / Neutral "
-            "because breadth is required for a directional label."
-        )
-    elif missing_constituents:
-        st.warning(
-            f"Yahoo Finance returned no usable history for {missing_constituents} of "
-            f"{constituent_count} classified constituents. Breadth coverage is shown "
-            "per sector."
-        )
-    failed_batches = sector_df.attrs.get("failed_batches", [])
-    if failed_batches:
-        st.warning(
-            "Some Yahoo Finance history batches failed: " + "; ".join(failed_batches)
-        )
-    if sector_df.empty:
-        st.info("No sector data is available right now.")
-    else:
-        st.dataframe(
-            sector_df,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Index": st.column_config.NumberColumn("Index Level", format="%.2f"),
-                "1W Return": st.column_config.NumberColumn("1W Return", format="%.2f%%"),
-                "1M Return": st.column_config.NumberColumn("1M Return", format="%.2f%%"),
-                "3M Return": st.column_config.NumberColumn("3M Return", format="%.2f%%"),
-                "1M vs NIFTY": st.column_config.NumberColumn(
-                    "1M Relative Strength vs NIFTY (pp)", format="%.2f"
-                ),
-                "Above 20DMA": st.column_config.NumberColumn(
-                    "Stocks Above 20DMA", format="%.1f%%"
-                ),
-                "Above 50DMA": st.column_config.NumberColumn(
-                    "Stocks Above 50DMA", format="%.1f%%"
-                ),
-            },
-        )
+    if st.button("🔄 REFRESH SECTOR TREND", use_container_width=True):
+        try:
+            with st.spinner("Loading NSE industry classifications and sector/stock history..."):
+                st.session_state.sector_dashboard_results = build_sector_dashboard()
+            st.session_state.sector_dashboard_scan_time = datetime.now(IST).strftime(
+                "%d-%b-%Y %H:%M:%S IST"
+            )
+        except Exception as e:
+            st.error(f"Sector dashboard refresh failed: {e}")
+
+    if st.session_state.get("sector_dashboard_results") is not None:
+        sector_df = st.session_state.sector_dashboard_results.copy()
         st.caption(
-            "Bullish requires the sector index above its 20/50-day averages, "
-            "outperformance versus NIFTY over one month, and at least 60% of "
-            "tracked constituents above their 20-day average. Bearish uses the "
-            "opposite trend/relative-strength conditions and 40% or lower breadth; "
-            "all other combinations are Mixed / Neutral. Breadth coverage shows "
-            "tracked constituents versus NSE-classified NIFTY 500 constituents."
+            "Last sector refresh: "
+            + st.session_state.get("sector_dashboard_scan_time", "—")
         )
-        st.download_button(
-            "⬇️ Download Sector Trend & Breadth",
-            sector_df.to_csv(index=False).encode(),
-            "nse_sector_trend_breadth.csv",
-            "text/csv",
-            use_container_width=True,
-        )
-else:
-    st.info("Tap **REFRESH SECTOR TREND** to view the independent sector dashboard.")
-
-st.divider()
-st.subheader("📊 INDEX F&O TRADING — INDEPENDENT MODULE")
-st.caption("Standalone NIFTY/BANKNIFTY intraday module — completely independent of UDTS Steps 1–3. Refresh this directly without running UDTS.")
-st.caption("Flow: 15m Trend → CPR + Previous Day High/Low → VWAP → 5m Breakout + Retest → EMA 21/34 → RSI → ATM/1-step ITM → Fixed SL → 1:1.5 / 1:2")
-
-fno_moneyness = st.radio("Option selection", ["1-step ITM", "ATM"], horizontal=True, key="index_fno_moneyness")
-if st.button("🔄 REFRESH INDEX F&O SETUP", use_container_width=True):
-    try:
-        with st.spinner("Checking live NIFTY and BANKNIFTY setup..."):
-            st.session_state.index_fno_results = build_index_fno_table(fno_moneyness)
-        st.session_state.index_fno_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
-    except Exception as e:
-        st.error(f"Index F&O refresh failed: {e}")
-
-if st.session_state.get("index_fno_results") is not None:
-    idxdf = st.session_state.index_fno_results.copy()
-    st.caption("Last Index F&O refresh: " + st.session_state.get("index_fno_scan_time", "—"))
-    if idxdf.empty:
-        st.info("No index data available right now.")
+        unavailable_indices = sector_df.attrs.get("unavailable_indices", [])
+        if unavailable_indices:
+            st.warning(
+                "Yahoo Finance did not return enough history for: "
+                + ", ".join(unavailable_indices)
+            )
+        constituent_count = sector_df.attrs.get("constituent_count", 0)
+        missing_constituents = sector_df.attrs.get("missing_constituents", 0)
+        if not sector_df.attrs.get("breadth_available", False):
+            st.warning(
+                "Constituent breadth is unavailable; sectors will remain Mixed / Neutral "
+                "because breadth is required for a directional label."
+            )
+        elif missing_constituents:
+            st.warning(
+                f"Yahoo Finance returned no usable history for {missing_constituents} of "
+                f"{constituent_count} classified constituents. Breadth coverage is shown "
+                "per sector."
+            )
+        failed_batches = sector_df.attrs.get("failed_batches", [])
+        if failed_batches:
+            st.warning(
+                "Some Yahoo Finance history batches failed: " + "; ".join(failed_batches)
+            )
+        if sector_df.empty:
+            st.info("No sector data is available right now.")
+        else:
+            st.dataframe(
+                sector_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Index": st.column_config.NumberColumn("Index Level", format="%.2f"),
+                    "1W Return": st.column_config.NumberColumn("1W Return", format="%.2f%%"),
+                    "1M Return": st.column_config.NumberColumn("1M Return", format="%.2f%%"),
+                    "3M Return": st.column_config.NumberColumn("3M Return", format="%.2f%%"),
+                    "1M vs NIFTY": st.column_config.NumberColumn(
+                        "1M Relative Strength vs NIFTY (pp)", format="%.2f"
+                    ),
+                    "Above 20DMA": st.column_config.NumberColumn(
+                        "Stocks Above 20DMA", format="%.1f%%"
+                    ),
+                    "Above 50DMA": st.column_config.NumberColumn(
+                        "Stocks Above 50DMA", format="%.1f%%"
+                    ),
+                },
+            )
+            st.caption(
+                "Bullish requires the sector index above its 20/50-day averages, "
+                "outperformance versus NIFTY over one month, and at least 60% of "
+                "tracked constituents above their 20-day average. Bearish uses the "
+                "opposite trend/relative-strength conditions and 40% or lower breadth; "
+                "all other combinations are Mixed / Neutral. Breadth coverage shows "
+                "tracked constituents versus NSE-classified NIFTY 500 constituents."
+            )
+            st.download_button(
+                "⬇️ Download Sector Trend & Breadth",
+                sector_df.to_csv(index=False).encode(),
+                "nse_sector_trend_breadth.csv",
+                "text/csv",
+                use_container_width=True,
+            )
     else:
-        display_cols = ["Index","Price","15m Trend","Prev Day High","Prev Day Low","CPR","VWAP","EMA","RSI",
-                        "5m Breakout/Retest","Direction","Entry Signal","Option","Expiry","Type","Strike",
-                        "Premium","Option Entry","Fixed SL","Target 1 (1:1.5)","Target 2 (1:2)","Risk/Reward"]
-        st.dataframe(idxdf[display_cols], hide_index=True, use_container_width=True,
-            column_config={
-                "Price": st.column_config.NumberColumn("Index Price", format="%.2f"),
-                "Prev Day High": st.column_config.NumberColumn("Prev Day High", format="%.2f"),
-                "Prev Day Low": st.column_config.NumberColumn("Prev Day Low", format="%.2f"),
-                "RSI": st.column_config.NumberColumn("RSI", format="%.2f"),
-                "Premium": st.column_config.NumberColumn("Premium", format="₹%.2f"),
-                "Option Entry": st.column_config.NumberColumn("Entry", format="₹%.2f"),
-                "Fixed SL": st.column_config.NumberColumn("SL", format="₹%.2f"),
-                "Target 1 (1:1.5)": st.column_config.NumberColumn("T1", format="₹%.2f"),
-                "Target 2 (1:2)": st.column_config.NumberColumn("T2", format="₹%.2f"),
-            })
-        st.download_button("⬇️ Download Index F&O Setup", idxdf.to_csv(index=False).encode(),
-                           "index_fno_step4.csv", "text/csv", use_container_width=True)
-        st.warning("This is a rules-based setup/contract-selection aid, not a trade guarantee. Verify live price, option liquidity, expiry and current exchange lot size before placing any F&O order.")
-else:
-    st.info("Tap **REFRESH INDEX F&O SETUP** to get the current NIFTY/BANKNIFTY setup — no UDTS scan needed.")
+        st.info("Tap **REFRESH SECTOR TREND** to view the independent sector dashboard.")
 
-st.caption("Day candle is sourced from NSE EOD bhavcopy; Yahoo Finance is used for historical context, 15-minute bars and current price. The scanner implements the 3/3 candle rule you specified and is designed to work without depending on Nifty Indices' anti-bot CSV endpoint.")
+if active_module == "Index F&O Trading":
+    st.divider()
+    st.subheader("📊 INDEX F&O TRADING — INDEPENDENT MODULE")
+    st.caption("Standalone NIFTY/BANKNIFTY intraday module — completely independent of UDTS Steps 1–3. Refresh this directly without running UDTS.")
+    st.caption("Flow: 15m Trend → CPR + Previous Day High/Low → VWAP → 5m Breakout + Retest → EMA 21/34 → RSI → ATM/1-step ITM → Fixed SL → 1:1.5 / 1:2")
+
+    fno_moneyness = st.radio("Option selection", ["1-step ITM", "ATM"], horizontal=True, key="index_fno_moneyness")
+    if st.button("🔄 REFRESH INDEX F&O SETUP", use_container_width=True):
+        try:
+            with st.spinner("Checking live NIFTY and BANKNIFTY setup..."):
+                st.session_state.index_fno_results = build_index_fno_table(fno_moneyness)
+            st.session_state.index_fno_scan_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S IST")
+        except Exception as e:
+            st.error(f"Index F&O refresh failed: {e}")
+
+    if st.session_state.get("index_fno_results") is not None:
+        idxdf = st.session_state.index_fno_results.copy()
+        st.caption("Last Index F&O refresh: " + st.session_state.get("index_fno_scan_time", "—"))
+        if idxdf.empty:
+            st.info("No index data available right now.")
+        else:
+            display_cols = ["Index","Price","15m Trend","Prev Day High","Prev Day Low","CPR","VWAP","EMA","RSI",
+                            "5m Breakout/Retest","Direction","Entry Signal","Option","Expiry","Type","Strike",
+                            "Premium","Option Entry","Fixed SL","Target 1 (1:1.5)","Target 2 (1:2)","Risk/Reward"]
+            st.dataframe(idxdf[display_cols], hide_index=True, use_container_width=True,
+                column_config={
+                    "Price": st.column_config.NumberColumn("Index Price", format="%.2f"),
+                    "Prev Day High": st.column_config.NumberColumn("Prev Day High", format="%.2f"),
+                    "Prev Day Low": st.column_config.NumberColumn("Prev Day Low", format="%.2f"),
+                    "RSI": st.column_config.NumberColumn("RSI", format="%.2f"),
+                    "Premium": st.column_config.NumberColumn("Premium", format="₹%.2f"),
+                    "Option Entry": st.column_config.NumberColumn("Entry", format="₹%.2f"),
+                    "Fixed SL": st.column_config.NumberColumn("SL", format="₹%.2f"),
+                    "Target 1 (1:1.5)": st.column_config.NumberColumn("T1", format="₹%.2f"),
+                    "Target 2 (1:2)": st.column_config.NumberColumn("T2", format="₹%.2f"),
+                })
+            st.download_button("⬇️ Download Index F&O Setup", idxdf.to_csv(index=False).encode(),
+                               "index_fno_step4.csv", "text/csv", use_container_width=True)
+            st.warning("This is a rules-based setup/contract-selection aid, not a trade guarantee. Verify live price, option liquidity, expiry and current exchange lot size before placing any F&O order.")
+    else:
+        st.info("Tap **REFRESH INDEX F&O SETUP** to get the current NIFTY/BANKNIFTY setup — no UDTS scan needed.")
+
+    st.caption("Day candle is sourced from NSE EOD bhavcopy; Yahoo Finance is used for historical context, 15-minute bars and current price. The scanner implements the 3/3 candle rule you specified and is designed to work without depending on Nifty Indices' anti-bot CSV endpoint.")
