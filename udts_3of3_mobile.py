@@ -1238,6 +1238,22 @@ if "results" in st.session_state:
         st.dataframe(shorts_udts[udts_cols], hide_index=True, use_container_width=True,
                      column_config={"Price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f")})
         with st.expander("⚪ Mixed / rejected by UDTS"):
+            aligned_month_week = mixed["Month"].eq(mixed["Week"]) & mixed["Month"].isin(["🟢", "🔴"])
+            daily_only_rejected = mixed.loc[
+                aligned_month_week & mixed["Day"].ne(mixed["Month"]),
+                ["Stock", "Month", "Week", "Day", "EOD Date"],
+            ].copy()
+            daily_only_rejected["UDTS Side"] = daily_only_rejected["Month"].map(
+                {"🟢": "LONG", "🔴": "SHORT"}
+            )
+            st.markdown("**Monthly + Weekly passed, Daily failed**")
+            st.caption("Month and Week agree for LONG or SHORT, but the daily candle does not confirm that side.")
+            st.dataframe(
+                daily_only_rejected[["Stock", "UDTS Side", "Month", "Week", "Day", "EOD Date"]],
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.markdown("**All mixed / rejected results**")
             st.dataframe(mixed[["Stock", "Month", "Week", "Day", "Direction", "EOD Date"]], hide_index=True, use_container_width=True)
         st.download_button("⬇️ Download UDTS 3/3 List", passed_udts[udts_cols].to_csv(index=False).encode(), "udts_3of3_list.csv", "text/csv", use_container_width=True)
 
