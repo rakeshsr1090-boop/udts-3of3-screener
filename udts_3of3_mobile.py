@@ -220,6 +220,10 @@ SECTOR_INDICES = {
     "NIFTY Infrastructure": "^CNXINFRA",
     "NIFTY Media": "^CNXMEDIA",
 }
+SECTOR_INDEX_FALLBACKS = {
+    "NIFTY Financial Services": ("NIFTY_FIN_SERVICE.NS",),
+    "NIFTY Media": ("NIFTY_MEDIA.NS",),
+}
 SECTOR_INDUSTRY_KEYWORDS = {
     "Banks": ("bank",),
     "Financial Services": ("financial", "finance", "insurance", "capital market", "investment"),
@@ -479,6 +483,23 @@ def build_sector_dashboard():
     index_prices = yahoo_daily_close_history(index_tickers)
     if index_prices.empty or "^NSEI" not in index_prices:
         raise RuntimeError("Yahoo Finance did not return NIFTY benchmark history.")
+
+    for sector_name, ticker in SECTOR_INDICES.items():
+        existing = index_prices[ticker].dropna() if ticker in index_prices else pd.Series(dtype=float)
+        if len(existing) >= 50:
+            continue
+        for fallback_ticker in SECTOR_INDEX_FALLBACKS.get(sector_name, ()):
+            fallback_prices = yahoo_daily_close_history((fallback_ticker,))
+            if fallback_ticker not in fallback_prices:
+                continue
+            fallback_history = fallback_prices[fallback_ticker].dropna()
+            if len(fallback_history) < 50:
+                continue
+            if ticker in index_prices:
+                index_prices[ticker] = index_prices[ticker].combine_first(fallback_history)
+            else:
+                index_prices[ticker] = fallback_history
+            break
 
     stock_tickers = tuple(
         ticker for members in members_by_sector.values() for ticker in members
