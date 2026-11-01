@@ -13,7 +13,164 @@ import requests
 import streamlit as st
 import yfinance as yf
 
-st.set_page_config(page_title="UDTS + Independent Index F&O", page_icon="📈", layout="centered")
+st.set_page_config(page_title="UDTS + Independent Index F&O", page_icon="📈", layout="wide")
+
+st.markdown(
+    """
+    <style>
+    :root {
+        --ink: #17233b;
+        --muted: #64748b;
+        --line: #e2e8f0;
+        --surface: #ffffff;
+        --brand: #2457d6;
+        --green: #07875b;
+        --red: #c43d4b;
+    }
+    .stApp {
+        background:
+            radial-gradient(ellipse at 12% 0%, rgba(37, 99, 235, .08), transparent 34rem),
+            #f5f7fb;
+    }
+    [data-testid="stMainBlockContainer"] {
+        max-width: 1540px;
+        padding-top: 2rem;
+        padding-bottom: 4rem;
+    }
+    [data-testid="stHeader"] {
+        background: rgba(245, 247, 251, .82);
+    }
+    .app-hero {
+        position: relative;
+        overflow: hidden;
+        margin: 0 0 1.4rem;
+        padding: 1.8rem 2rem;
+        border: 1px solid rgba(255,255,255,.16);
+        border-radius: 22px;
+        color: #fff;
+        background: linear-gradient(125deg, #132449 0%, #1f4ca7 60%, #3278d4 100%);
+        box-shadow: 0 18px 42px rgba(30, 64, 130, .18);
+    }
+    .app-hero:after {
+        position: absolute;
+        top: -105px;
+        right: -25px;
+        width: 290px;
+        height: 290px;
+        border: 1px solid rgba(255,255,255,.15);
+        border-radius: 50%;
+        box-shadow: 0 0 0 34px rgba(255,255,255,.035), 0 0 0 70px rgba(255,255,255,.025);
+        content: "";
+    }
+    .app-hero-kicker {
+        margin-bottom: .45rem;
+        color: #b9d1ff;
+        font-size: .75rem;
+        font-weight: 750;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+    }
+    .app-hero h1 {
+        margin: 0;
+        color: #fff;
+        font-size: clamp(1.7rem, 3vw, 2.45rem);
+        font-weight: 780;
+        letter-spacing: -.035em;
+        line-height: 1.15;
+    }
+    .app-hero p {
+        max-width: 760px;
+        margin: .7rem 0 0;
+        color: #d7e4ff;
+        font-size: 1rem;
+        line-height: 1.55;
+    }
+    [data-testid="stMetric"] {
+        padding: 1rem 1.15rem;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--surface);
+        box-shadow: 0 5px 16px rgba(15, 23, 42, .035);
+    }
+    [data-testid="stMetricLabel"] {
+        color: var(--muted);
+        font-size: .82rem;
+        font-weight: 650;
+    }
+    [data-testid="stMetricValue"] {
+        color: var(--ink);
+        font-weight: 760;
+    }
+    [data-testid="stDataFrame"] {
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #fff;
+        box-shadow: 0 4px 14px rgba(15, 23, 42, .035);
+    }
+    [data-testid="stExpander"] {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgba(255,255,255,.84);
+    }
+    [data-testid="stButton"] > button,
+    [data-testid="stDownloadButton"] > button {
+        min-height: 2.8rem;
+        border-radius: 11px;
+        font-weight: 680;
+        transition: transform .15s ease, box-shadow .15s ease;
+    }
+    [data-testid="stButton"] > button:hover,
+    [data-testid="stDownloadButton"] > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 7px 18px rgba(37, 87, 214, .15);
+    }
+    [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stMarkdownContainer"] h3 {
+        color: var(--ink);
+        letter-spacing: -.025em;
+    }
+    [data-testid="stMarkdownContainer"] h3 {
+        padding-bottom: .45rem;
+        border-bottom: 1px solid var(--line);
+    }
+    [data-testid="stCaptionContainer"] {
+        color: var(--muted);
+    }
+    .signal-guide {
+        display: flex;
+        flex-wrap: wrap;
+        gap: .65rem;
+        margin: .75rem 0 1rem;
+    }
+    .signal-guide span {
+        padding: .5rem .8rem;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(255,255,255,.84);
+        color: var(--ink);
+        font-size: .88rem;
+        font-weight: 650;
+    }
+    @media (max-width: 700px) {
+        [data-testid="stMainBlockContainer"] {
+            padding: 1rem .75rem 2.5rem;
+        }
+        .app-hero {
+            padding: 1.35rem 1.15rem;
+            border-radius: 17px;
+        }
+        .app-hero:after {
+            right: -180px;
+        }
+        [data-testid="stMetric"] {
+            padding: .8rem;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 DAILY_RESULTS_FILE = Path(__file__).with_name("udts_daily_results.json")
@@ -1389,16 +1546,33 @@ if os.environ.get("UDTS_DAILY_SCAN") == "1":
     raise SystemExit(0)
 
 
-st.title("📈 UDTS 3/3 Mobile Screener")
-st.caption("STEP 1: Strict UDTS filter — previous completed Month + Week + Day")
+st.markdown(
+    """
+    <section class="app-hero">
+        <div class="app-hero-kicker">Market analysis workspace</div>
+        <h1>UDTS 3/3 Screener</h1>
+        <p>Find aligned stock trends, review live confirmations, and explore independent
+        sector strength and index setups — all in one place.</p>
+    </section>
+    """,
+    unsafe_allow_html=True,
+)
+st.caption("STEP 1 · Strict UDTS filter using the previous completed Month + Week + Day")
 
 with st.expander("⚙️ Settings"):
     workers = st.slider("Parallel downloads", 2, 12, 8)
     broader_scan = st.checkbox("Broader market scan (include more Godrej-style setups)", value=False)
     min_strength = st.slider("Minimum strength filter", 6.5, 10.0, 7.0 if broader_scan else 8.0, 0.5)
 
-st.markdown("**LONG:** 🟢 Month + 🟢 Week + 🟢 Day")
-st.markdown("**SHORT:** 🔴 Month + 🔴 Week + 🔴 Day")
+st.markdown(
+    """
+    <div class="signal-guide">
+        <span>🟢 LONG · Month + Week + Day aligned</span>
+        <span>🔴 SHORT · Month + Week + Day aligned</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 if st.button("🔄 SCAN UDTS ONLY", type="primary", use_container_width=True):
     try:
