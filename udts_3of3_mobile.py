@@ -22,6 +22,11 @@ NIFTY200_URLS = [
     "https://archives.nseindia.com/content/indices/ind_nifty200list.csv",
     "https://nsearchives.nseindia.com/content/indices/ind_nifty200list.csv",
 ]
+NIFTY500_URLS = [
+    "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
+    "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
+    "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv",
+]
 NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/139 Safari/537.36",
     "Accept": "*/*",
@@ -137,6 +142,53 @@ def symbols():
     if fallback:
         return sorted(fallback.keys())
     return []
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def nse_industry_by_symbol():
+    """Fetch NSE's industry classification for NIFTY 500 constituents."""
+    session = requests.Session()
+    session.headers.update(NSE_HEADERS)
+
+    for url in NIFTY500_URLS:
+        try:
+            response = session.get(url, timeout=25)
+            response.raise_for_status()
+            constituents = pd.read_csv(io.StringIO(response.text))
+            columns = {str(column).strip().upper(): column for column in constituents.columns}
+            symbol_column = columns.get("SYMBOL")
+            industry_column = columns.get("INDUSTRY")
+            if symbol_column is None or industry_column is None:
+                continue
+
+            classifications = constituents[[symbol_column, industry_column]].dropna()
+            industry_by_symbol = {
+                str(symbol).strip().upper(): str(industry).strip()
+                for symbol, industry in classifications.itertuples(index=False, name=None)
+                if str(symbol).strip() and str(industry).strip()
+            }
+            if industry_by_symbol:
+                return industry_by_symbol
+        except (
+            requests.RequestException,
+            pd.errors.EmptyDataError,
+            pd.errors.ParserError,
+            UnicodeDecodeError,
+            ValueError,
+        ):
+            continue
+
+    return {}
+
+
+def add_nse_industry(df, industry_by_symbol):
+    result = df.copy()
+    result["NSE Industry"] = (
+        result["Stock"].astype(str).str.strip().str.upper()
+        .map(industry_by_symbol)
+        .fillna("Not classified")
+    )
+    return result
 
 
 def _parse_nse_frame(df):
@@ -1170,6 +1222,8 @@ if st.button("🔄 SCAN UDTS ONLY", type="primary", use_container_width=True):
         st.error(f"UDTS scan failed: {e}")
 
 with st.expander("📅 Saved daily UDTS results"):
+    industry_by_symbol = None
+    industry_warning_shown = False
     try:
         saved_days = list_saved_daily_results()
         if saved_days.empty:
@@ -1194,7 +1248,12 @@ with st.expander("📅 Saved daily UDTS results"):
                 if saved_df.empty:
                     st.info("The saved scan had no matching stocks.")
                 else:
-                    history_cols = ["Stock", "Month", "Week", "Day", "Direction", "Price", "EOD Date"]
+                    industry_by_symbol = nse_industry_by_symbol()
+                    if not industry_by_symbol:
+                        st.warning("NSE industry classifications could not be loaded; stocks will show as Not classified.")
+                        industry_warning_shown = True
+                    saved_df = add_nse_industry(saved_df, industry_by_symbol)
+                    history_cols = ["Stock", "NSE Industry", "Month", "Week", "Day", "Direction", "Price", "EOD Date"]
                     history_df = saved_df[history_cols].sort_values(["Direction", "Stock"])
                     st.dataframe(
                         history_df,
@@ -1218,6 +1277,12 @@ with st.expander("📅 Saved daily UDTS results"):
 if "results" in st.session_state:
     df = pd.DataFrame(st.session_state.results)
     if not df.empty:
+        if industry_by_symbol is None:
+            industry_by_symbol = nse_industry_by_symbol()
+        if not industry_by_symbol and not industry_warning_shown:
+            st.warning("NSE industry classifications could not be loaded; stocks will show as Not classified.")
+            industry_warning_shown = True
+        df = add_nse_industry(df, industry_by_symbol)
         passed_udts = df[df.Direction.isin(["LONG", "SHORT"])].copy()
         mixed = df[~df.Direction.isin(["LONG", "SHORT"])].copy()
         st.session_state.udts_passed = passed_udts.copy()
@@ -1230,7 +1295,7 @@ if "results" in st.session_state:
         st.caption(f"NSE EOD candle used: {st.session_state.eod_date}")
         st.caption("Broader scan mode: ON" if st.session_state.get("broader_scan", False) else "Broader scan mode: OFF")
 
-        udts_cols = ["Stock", "Month", "Week", "Day", "Direction", "Price"]
+        udts_cols = ["Stock", "NSE Industry", "Month", "Week", "Day", "Direction", "Price"]
         st.subheader("🟢 UDTS LONG — 3/3")
         st.dataframe(longs_udts[udts_cols], hide_index=True, use_container_width=True,
                      column_config={"Price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f")})
@@ -1241,7 +1306,7 @@ if "results" in st.session_state:
             aligned_month_week = mixed["Month"].eq(mixed["Week"]) & mixed["Month"].isin(["🟢", "🔴"])
             daily_only_rejected = mixed.loc[
                 aligned_month_week & mixed["Day"].ne(mixed["Month"]),
-                ["Stock", "Month", "Week", "Day", "EOD Date"],
+                ["Stock", "NSE Industry", "Month", "Week", "Day", "EOD Date"],
             ].copy()
             daily_only_rejected["UDTS Side"] = daily_only_rejected["Month"].map(
                 {"🟢": "LONG", "🔴": "SHORT"}
@@ -1249,12 +1314,12 @@ if "results" in st.session_state:
             st.markdown("**Monthly + Weekly passed, Daily failed**")
             st.caption("Month and Week agree for LONG or SHORT, but the daily candle does not confirm that side.")
             st.dataframe(
-                daily_only_rejected[["Stock", "UDTS Side", "Month", "Week", "Day", "EOD Date"]],
+                daily_only_rejected[["Stock", "NSE Industry", "UDTS Side", "Month", "Week", "Day", "EOD Date"]],
                 hide_index=True,
                 use_container_width=True,
             )
             st.markdown("**All mixed / rejected results**")
-            st.dataframe(mixed[["Stock", "Month", "Week", "Day", "Direction", "EOD Date"]], hide_index=True, use_container_width=True)
+            st.dataframe(mixed[["Stock", "NSE Industry", "Month", "Week", "Day", "Direction", "EOD Date"]], hide_index=True, use_container_width=True)
         st.download_button("⬇️ Download UDTS 3/3 List", passed_udts[udts_cols].to_csv(index=False).encode(), "udts_3of3_list.csv", "text/csv", use_container_width=True)
 
         st.divider()
@@ -1285,7 +1350,7 @@ if "results" in st.session_state:
             st.caption("Last live confirmation refresh: " + st.session_state.confirm_scan_time)
             st.caption("Indicator timeframe: 15-minute LIVE | Current completed 15m bars included; current in-progress bar excluded")
 
-            confirm_cols = ["Stock", "Direction", "Price", "CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Confirm Score", "Strength Score", "Grade", "Mandatory Gate", "Trade Candidate", "Confirmation"]
+            confirm_cols = ["Stock", "NSE Industry", "Direction", "Price", "CPR", "VWAP", "EMA", "RSI", "RVOL", "ADX", "Confirm Score", "Strength Score", "Grade", "Mandatory Gate", "Trade Candidate", "Confirmation"]
             st.markdown("**🟢 LONG confirmation candidates**")
             st.dataframe(longs_confirm[confirm_cols], hide_index=True, use_container_width=True,
                          column_config={"Price": st.column_config.NumberColumn("Live Price (₹)", format="₹%.2f"), "RSI": st.column_config.NumberColumn("RSI", format="%.2f"), "Confirm Score": st.column_config.NumberColumn("Confirm", format="%.0f")})
@@ -1312,7 +1377,8 @@ if "results" in st.session_state:
                 if fno_df.empty:
                     st.warning("NSE did not return usable ATM option quotes for the eligible candidates. Try again shortly.")
                 else:
-                    fno_cols = ["Stock", "Direction", "Strength Score", "Grade", "ADX", "RVOL", "Expiry", "Underlying", "ATM Strike", "Lot Size", "CE-ATM Price - Long", "PE-ATM Price - Short"]
+                    fno_df = add_nse_industry(fno_df, industry_by_symbol or {})
+                    fno_cols = ["Stock", "NSE Industry", "Direction", "Strength Score", "Grade", "ADX", "RVOL", "Expiry", "Underlying", "ATM Strike", "Lot Size", "CE-ATM Price - Long", "PE-ATM Price - Short"]
                     st.dataframe(fno_df[fno_cols], hide_index=True, use_container_width=True,
                         column_config={
                             "Strength Score": st.column_config.NumberColumn("Strength", format="%.1f/10"),
